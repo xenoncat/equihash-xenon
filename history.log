@@ -1,0 +1,4 @@
+20161013
+Initial version, single threaded only. AVX2 required
+Expected performance:
+Core i5-4200U single thread 450ms, 4.4 Sol/s. Expect 1.8x performance when 2 instances are run.
