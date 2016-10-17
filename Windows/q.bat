@@ -1,1 +1,1 @@
-\fasm\fasm.exe test.asm
+\fasm\fasm.exe test_avx1.asm

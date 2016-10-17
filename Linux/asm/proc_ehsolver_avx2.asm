@@ -1,4 +1,4 @@
-include "macro_blake2b.asm"
+include "macro_blake2b_avx2.asm"
 
 macro RecordRdtsc
 {
@@ -19,33 +19,19 @@ mov [rbp+EH.debugptr], rcx
 }
 
 EhSolver:
-mov rcx, rdi
-mov rdx, rsi
 push r15
 push r14
 push r13
 push r12
-push rdi
-push rsi
 push rbp
 push rbx
 mov rax, rsp
-sub rsp, 0xd8
+sub rsp, 0x28
 and rsp, -32
-vmovdqa [rsp+0x20], xmm6
-vmovdqa [rsp+0x30], xmm7
-vmovdqa [rsp+0x40], xmm8
-vmovdqa [rsp+0x50], xmm9
-vmovdqa [rsp+0x60], xmm10
-vmovdqa [rsp+0x70], xmm11
-vmovdqa [rsp+0x80], xmm12
-vmovdqa [rsp+0x90], xmm13
-vmovdqa [rsp+0xa0], xmm14
-vmovdqa [rsp+0xb0], xmm15
-mov [rsp+0xc0], rax
+mov [rsp+0x20], rax
 
-mov rbp, rcx
-vmovd xmm0, edx
+mov rbp, rdi
+vmovd xmm0, esi
 vpbroadcastq ymm0, xmm0
 vpblendd ymm0, ymm0, yword [yctrinit], 0xaa
 vmovdqa yword [rbp+EH.mids+0xe0], ymm0
@@ -742,21 +728,9 @@ RecordRdtsc
 mov eax, ebx
 
 _EhSolverEpilog:
-vmovdqa xmm6, [rsp+0x20]
-vmovdqa xmm7, [rsp+0x30]
-vmovdqa xmm8, [rsp+0x40]
-vmovdqa xmm9, [rsp+0x50]
-vmovdqa xmm10, [rsp+0x60]
-vmovdqa xmm11, [rsp+0x70]
-vmovdqa xmm12, [rsp+0x80]
-vmovdqa xmm13, [rsp+0x90]
-vmovdqa xmm14, [rsp+0xa0]
-vmovdqa xmm15, [rsp+0xb0]
-mov rsp, [rsp+0xc0]
+mov rsp, [rsp+0x20]
 pop rbx
 pop rbp
-pop rsi
-pop rdi
 pop r12
 pop r13
 pop r14

@@ -71,142 +71,83 @@ jmp _Exit
 _MemAllocOK:
 mov [hMem1], rax
 
-mov rdi, [hMem1]
-lea rsi, [rdi+sizeof.EH]
-xor eax, eax
-_LoopPrimePageTable:
-mov [rdi], eax
-add rdi, 4096
-cmp rdi, rsi
-jb _LoopPrimePageTable
-
 lea rcx, [rsp+0x78]
 call [QueryPerformanceFrequency]
 mov ecx, fmtqpcfreq
 mov rdx, [rsp+0x78]
 call [printf]
 
-mov ecx, szRunning
-call [puts]
-
-lea rcx, [rsp+0x80]
-call [QueryPerformanceCounter]
-rdtsc
-shl rdx, 32
-or rax, rdx
-mov [rsp+0x88], rax
-
 mov rcx, [hMem1]
 mov edx, t1
 call _ProcEhPrepare
 
+lea rcx, [rsp+0x80]
+call [QueryPerformanceCounter]
 mov rcx, [hMem1]
-mov edx, dword [t1+136]
-	;add edx, 17
+xor edx, edx
+call _ProcEhSolver	;Warm up run
+mov ebx, eax
+lea rcx, [rsp+0x90]
+call [QueryPerformanceCounter]
+mov rax, [rsp+0x90]
+sub rax, [rsp+0x80]
+imul rax, rax, 1000
+xor edx, edx
+mov rcx, [rsp+0x78]
+div rcx
+mov ecx, fmtWarmupTime
+mov edx, eax
+mov r8d, ebx
+call [printf]
+
+START_NONCE = 58		;arbritary number to get 19 solutions in 10 iterations (to match 1.88 solutions per run)
+END_NONCE = 68
+mov dword [rsp+0x50], START_NONCE
+xor eax, eax
+mov [rsp+0x54], eax	;accumulate solutions
+mov [rsp+0x58], rax	;accumulate delta QPC
+
+_LoopNonce1:
+lea rcx, [rsp+0x80]
+call [QueryPerformanceCounter]
+
+mov rcx, [hMem1]
+mov edx, [rsp+0x50]
 call _ProcEhSolver
+add [rsp+0x54], eax
 mov ebx, eax
 
 lea rcx, [rsp+0x90]
 call [QueryPerformanceCounter]
-rdtsc
-shl rdx, 32
-or rax, rdx
-mov [rsp+0x98], rax
-;
-mov rbp, [hMem1]
-mov ecx, fmttimingblake
-mov rdx, [rbp+EH.debug+8]
-sub rdx, [rbp+EH.debug]
-call [printf]
-
-if 1
-lea rsi, [rbp+EH.debug+16]
-mov r12, [rbp+EH.debug+8]
-mov edi, 1
-_LoopPrintStageTiming:
-mov r9, [rsi]
-mov rax, r12
-mov r12, r9
-sub r9, rax
-mov r8d, [rsi+8]
-mov ecx, fmttimingstage
-mov edx, edi
-call [printf]
-add rsi, 16
-add edi, 1
-cmp edi, 10
-jb _LoopPrintStageTiming
-end if
-
-mov ecx, fmtsolution1
-mov edx, dword [rbp+EH.bucket0ptr]
-call [printf]
-
-mov ecx, fmttimingremdup
-mov rdx, [rsi]
-sub rdx, r12
-call [printf]
-
-mov ecx, fmtsolution2
-mov edx, ebx
-call [printf]
-
-;
-mov rax, [rsp+0x78]
-xor edx, edx
-mov ecx, 1000
-div rcx
-mov [rsp+0x70], rax
 mov rax, [rsp+0x90]
 sub rax, [rsp+0x80]
-jz _DeltaTimeZero
-mov [rsp+0x20], rax
+add [rsp+0x58], rax
+imul rax, rax, 1000
 xor edx, edx
-div qword [rsp+0x70]
-mov rdx, rax
+mov rcx, [rsp+0x78]
+div rcx
 mov ecx, fmtTime
+mov edx, eax
+mov r8d, ebx
 call [printf]
 
-;rdtsc*qpf/qpc
-mov rax, [rsp+0x98]
-sub rax, [rsp+0x88]
-mul qword [rsp+0x78]
-div qword [rsp+0x20]
-mov ecx, fmtrdtscmeasured
-mov rdx, rax
+mov eax, [rsp+0x50]
+add eax, 1
+mov [rsp+0x50], eax
+cmp eax, END_NONCE
+jb _LoopNonce1
+
+mov rax, [rsp+0x58]
+imul rax, rax, 1000
+xor edx, edx
+mov rcx, [rsp+0x78]
+imul rcx, rcx, END_NONCE-START_NONCE
+div rcx
+mov edx, eax
+mov ecx, fmtAvgTime
 call [printf]
 
-_DeltaTimeZero:
-mov rbp, [hMem1]
-
-if 1
-mov rbp, [hMem1]
-mov ecx, szoutfile	;lpFileName
-mov edx, GENERIC_WRITE	;dwDesiredAccess
-mov r8d, 3		;dwShareMode
-xor r9d, r9d		;lpSecurityAttributes
-mov eax, CREATE_ALWAYS
-mov [rsp+0x20], rax	;dwCreationDisposition
-xor eax, eax
-mov [rsp+0x28], rax	;dwFlagsAndAttributes
-mov [rsp+0x30], rax	;hTemplateFile
-call [CreateFile]
-mov [rsp+0x30], rax
-mov rcx, [rsp+0x30]	;hFile
-;mov rdx, [hMem1]	;lpBuffer
-lea rdx, [rbp+EH.hashtab+1344*2]
-;lea rdx, [rbp+EH.hashtab]
-
-mov r8d, 1344		;nNumberOfBytesToWrite
-;mov r8d, 1344*4
-lea r9d, [rsp+0x38]	;lpNumberOfBytesWritten
-xor eax, eax
-mov [rsp+0x20], rax	;lpOverlapped
-call [WriteFile]
-mov rcx, [rsp+0x30]	;hFile
-call [CloseHandle]
-end if
-
+_Panic:
 mov rcx, [hMem1]
 xor edx, edx
 mov r8d, MEM_RELEASE	;0x8000
@@ -217,23 +158,26 @@ xor ecx, ecx
 call [ExitProcess]
 
 align 64
-include "proc_ehprepare.asm"
-include "proc_ehsolver.asm"
+include "proc_ehprepare_avx2.asm"
+include "proc_ehsolver_avx2.asm"
 
 endf
 
 section '.data' data readable writeable
 fmtdn db "%d", 0Dh, 0Ah, 0
+fmtds db "%d ", 0
 fmtxn db "%x", 0Dh, 0Ah, 0
 fmtllxn db "%016llx", 0Dh, 0Ah, 0
 fmtqpcfreq db "QueryPerformanceCounter frequency: %lld Hz", 0Dh, 0Ah, 0
 fmtrdtscmeasured db "Measured rdtsc frequency: %lld Hz", 0Dh, 0Ah, 0
 fmttimingblake db "BLAKE2b rdtsc: %lld", 0Dh, 0Ah, 0
-fmttimingstage db "Stage %d, Output pairs %d, rdtsc: %lld", 0Dh, 0Ah, 0
+fmttimingstage db "Stage %d, Output pairs %d, rdtsc: %lld %lld %lld %lld", 0Dh, 0Ah, 0
 fmtsolution1 db "Number of solutions before duplicate removal: %d", 0Dh, 0Ah, 0
 fmttimingremdup db "Duplicate removal and tree expand rdtsc: %lld", 0Dh, 0Ah, 0
 fmtsolution2 db "Solutions found: %d", 0Dh, 0Ah, 0
-fmtTime db "Time: %d ms", 0Dh, 0Ah, 0
+fmtWarmupTime db "(Warm up) Time: %u ms, solutions: %u", 0Dh, 0Ah, 0
+fmtTime db "Time: %u ms, solutions: %u", 0Dh, 0Ah, 0
+fmtAvgTime db "Average time: %d ms", 0D, 0Ah, 0
 szRunning db "Running solver...", 0
 szSeLMP db "SeLockMemoryPrivilege",0
 szLargePageFailed db "Failed to allocate Large Page, performance may be affected", 0

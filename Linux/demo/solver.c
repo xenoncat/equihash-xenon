@@ -1,5 +1,5 @@
 //compile with
-//gcc -o solver solver.c equihash_asm.o
+//gcc -o solver solver.c equihash_avx2.o
 //
 //./solver
 //sha256sum out2.bin

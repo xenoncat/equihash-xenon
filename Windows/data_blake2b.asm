@@ -1,6 +1,7 @@
 xshufb_ror24 db 3,4,5,6,7,0,1,2, 11,12,13,14,15,8,9,10
 xshufb_ror16 db 2,3,4,5,6,7,0,1, 10,11,12,13,14,15,8,9
 xshufb_bswap8 db 7,6,5,4,3,2,1,0, 15,14,13,12,11,10,9,8
+xctrinc dd 0,2, 0,2
 
 align 32
 iv dq 0x6a09e667f3bcc908, 0xbb67ae8584caa73b
@@ -9,7 +10,7 @@ dq 0x510e527fade682d1, 0x9b05688c2b3e6c1f
 dq 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179
 
 s0 dq 0x6a09e667f3bcc908 xor 0x1010032, 0xbb67ae8584caa73b
-dq 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1
+s2 dq 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1
 s4 dq 0x510e527fade682d1, 0x9b05688c2b3e6c1f
 s6 dq 0x1f83d9abfb41bd6b xor 0x576f50687361635a	;Personalization
 s7 dq 0x5be0cd19137e2179 xor 0x00000009000000c8

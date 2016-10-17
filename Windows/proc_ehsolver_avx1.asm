@@ -1,4 +1,4 @@
-include "macro_blake2b.asm"
+include "macro_blake2b_avx1.asm"
 
 macro RecordRdtsc
 {
@@ -43,10 +43,10 @@ vmovdqa [rsp+0xb0], xmm15
 mov [rsp+0xc0], rax
 
 mov rbp, rcx
-vmovd xmm0, edx
-vpbroadcastq ymm0, xmm0
-vpblendd ymm0, ymm0, yword [yctrinit], 0xaa
-vmovdqa yword [rbp+EH.mids+0xe0], ymm0
+mov edx, edx
+mov [rbp+EH.mids+0xd0], rdx
+mov [rbp+EH.mids+0xd8], rdx
+mov dword [rbp+EH.mids+0xdc], 1
 
 lea rcx, [rbp+EH.debug]
 rdtsc
@@ -67,26 +67,26 @@ lea rbx, [rbp+EH.basemap]
 
 _LoopBlake2b:
 Blake2beq2of2 rbp+EH.mids, rbp+EH.mids+0xc0
-vmovdqa ymm7, yword [rbp+EH.mids+0xe0]
-vpaddd ymm7, ymm7, yword [yctrinc]
-vmovdqa yword [rbp+EH.mids+0xe0], ymm7
-vbroadcasti128 ymm7, xword [xshufb_bswap8]
-vpshufb ymm0, ymm0, ymm7
-vpshufb ymm1, ymm1, ymm7
-vpshufb ymm2, ymm2, ymm7
-vpshufb ymm3, ymm3, ymm7
-vpshufb ymm4, ymm4, ymm7
-vpshufb ymm5, ymm5, ymm7
-vpshufb ymm6, ymm6, ymm7
+vmovdqa xmm7, xword [rbp+EH.mids+0xd0]
+vpaddd xmm7, xmm7, xword [xctrinc]
+vmovdqa xword [rbp+EH.mids+0xd0], xmm7
+vmovdqa xmm7, xword [xshufb_bswap8]
+vpshufb xmm0, xmm0, xmm7
+vpshufb xmm1, xmm1, xmm7
+vpshufb xmm2, xmm2, xmm7
+vpshufb xmm3, xmm3, xmm7
+vpshufb xmm4, xmm4, xmm7
+vpshufb xmm5, xmm5, xmm7
+vpshufb xmm6, xmm6, xmm7
 
-vpsrlq ymm8, ymm0, 56
-vpsllq ymm0, ymm0, 8
-;vpsrlq ymm0, ymm0, 0
-vpunpcklqdq ymm7, ymm2, ymm1
-vpunpckhqdq ymm2, ymm2, ymm1
-vpsrlq ymm1, ymm1, 56
-vpor ymm9, ymm0, ymm1		;xmm9=bucket data 2,0
-vpshufd ymm1, ymm3, 0x4e
+vpsrlq xmm8, xmm0, 56
+vpsllq xmm0, xmm0, 8
+;vpsrlq xmm0, xmm0, 0
+vpunpcklqdq xmm7, xmm2, xmm1
+vpunpckhqdq xmm2, xmm2, xmm1
+vpsrlq xmm1, xmm1, 56
+vpor xmm9, xmm0, xmm1		;xmm9=bucket data 2,0
+vpshufd xmm1, xmm3, 0x4e
 
 vpextrw r8d, xmm8, 0
 movzx eax, word [r12+r8*2]
@@ -101,7 +101,7 @@ mov [r10+r11], ecx
 imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
 lea rdi, [rsi+r8]
 add rdi, rdx
-vpalignr ymm10, ymm7, ymm1, 15	;xmm10=xor data 0
+vpalignr xmm10, xmm7, xmm1, 15	;xmm10=xor data 0
 vmovq rax, xmm10
 movnti [rdi], rax
 vpextrq rax, xmm10, 1
@@ -124,7 +124,7 @@ mov [r10+r11], ecx
 imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
 lea rdi, [rsi+r8]
 add rdi, rdx
-vpalignr ymm11, ymm2, ymm3, 15	;xmm11=xor data 2
+vpalignr xmm11, xmm2, xmm3, 15	;xmm11=xor data 2
 vmovq rax, xmm11
 movnti [rdi], rax
 vpextrq rax, xmm11, 1
@@ -133,71 +133,21 @@ vpextrq rax, xmm9, 1
 movnti [rdi+16], rax
 _SkipA2:
 
-vextracti128 xmm8, ymm8, 1
-vextracti128 xmm9, ymm9, 1
-vextracti128 xmm10, ymm10, 1
-vextracti128 xmm11, ymm11, 1
+vpsllq xmm8, xmm3, 8
+vpsrlq xmm8, xmm8, 56
+vpunpcklqdq xmm2, xmm4, xmm3
+vpunpckhqdq xmm3, xmm4, xmm3
+vpunpcklqdq xmm4, xmm6, xmm5
+vpunpckhqdq xmm5, xmm6, xmm5
+vpsrldq xmm0, xmm2, 6
+vpsrldq xmm1, xmm3, 6
+;vmovdqa xmm7, xword [xqmask64bit]
+;vpand xmm0, xmm0, xmm7	;bucket data 1
+;vpand xmm1, xmm1, xmm7	;bucket data 3
 
 vpextrw r8d, xmm8, 0
 movzx eax, word [r12+r8*2]
-add ecx, 2
-cmp eax, 10240
-jae _SkipA4
-imul edx, eax, 24
-imul r10d, eax, 1024
-add eax, 1
-mov word [r12+r8*2], ax
-lea r11, [rbx+r8*4]
-mov [r10+r11], ecx
-imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
-lea rdi, [rsi+r8]
-add rdi, rdx
-vmovq rax, xmm10
-movnti [rdi], rax
-vpextrq rax, xmm10, 1
-movnti [rdi+8], rax
-vmovq rax, xmm9
-movnti [rdi+16], rax
-_SkipA4:
-
-vpextrw r8d, xmm8, 4
-movzx eax, word [r12+r8*2]
-add ecx, 2
-cmp eax, 10240
-jae _SkipA6
-imul edx, eax, 24
-imul r10d, eax, 1024
-add eax, 1
-mov word [r12+r8*2], ax
-lea r11, [rbx+r8*4]
-mov [r10+r11], ecx
-imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
-lea rdi, [rsi+r8]
-add rdi, rdx
-vmovq rax, xmm11
-movnti [rdi], rax
-vpextrq rax, xmm11, 1
-movnti [rdi+8], rax
-vpextrq rax, xmm9, 1
-movnti [rdi+16], rax
-_SkipA6:
-
-vpsllq ymm8, ymm3, 8
-vpsrlq ymm8, ymm8, 56
-
-vpunpcklqdq ymm2, ymm4, ymm3
-vpunpckhqdq ymm3, ymm4, ymm3
-vpunpcklqdq ymm4, ymm6, ymm5
-vpunpckhqdq ymm5, ymm6, ymm5
-vpsrldq ymm0, ymm2, 6
-vpsrldq ymm1, ymm3, 6
-;vbroadcasti128 ymm7, xword [xqmask64bit]
-;vpand ymm0, ymm0, ymm7	;bucket data 1
-;vpand ymm1, ymm1, ymm7	;bucket data 3
-
-vpextrw r8d, xmm8, 0
-movzx eax, word [r12+r8*2]
-sub ecx, 5
+sub ecx, 1
 cmp eax, 10240
 jae _SkipA1
 imul edx, eax, 24
@@ -209,7 +159,7 @@ mov [r10+r11], ecx
 imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
 lea rdi, [rsi+r8]
 add rdi, rdx
-vpalignr ymm2, ymm2, ymm4, 6	;xor data 1
+vpalignr xmm2, xmm2, xmm4, 6	;xor data 1
 vmovq rax, xmm2
 movnti [rdi], rax
 vpextrq rax, xmm2, 1
@@ -232,7 +182,7 @@ mov [r10+r11], ecx
 imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
 lea rdi, [rsi+r8]
 add rdi, rdx
-vpalignr ymm3, ymm3, ymm5, 6	;xor data 3
+vpalignr xmm3, xmm3, xmm5, 6	;xor data 3
 vmovq rax, xmm3
 movnti [rdi], rax
 vpextrq rax, xmm3, 1
@@ -240,56 +190,6 @@ movnti [rdi+8], rax
 vmovq rax, xmm1
 movnti [rdi+16], rax
 _SkipA3:
-
-vextracti128 xmm8, ymm8, 1
-vextracti128 xmm0, ymm0, 1
-vextracti128 xmm1, ymm1, 1
-vextracti128 xmm2, ymm2, 1
-vextracti128 xmm3, ymm3, 1
-
-vpextrw r8d, xmm8, 0
-movzx eax, word [r12+r8*2]
-add ecx, 2
-cmp eax, 10240
-jae _SkipA5
-imul edx, eax, 24
-imul r10d, eax, 1024
-add eax, 1
-mov word [r12+r8*2], ax
-lea r11, [rbx+r8*4]
-mov [r10+r11], ecx
-imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
-lea rdi, [rsi+r8]
-add rdi, rdx
-vmovq rax, xmm2
-movnti [rdi], rax
-vpextrq rax, xmm2, 1
-movnti [rdi+8], rax
-vmovq rax, xmm0
-movnti [rdi+16], rax
-_SkipA5:
-
-vpextrw r8d, xmm8, 4
-movzx eax, word [r12+r8*2]
-add ecx, 2
-cmp eax, 10240
-jae _SkipA7
-imul edx, eax, 24
-imul r10d, eax, 1024
-add eax, 1
-mov word [r12+r8*2], ax
-lea r11, [rbx+r8*4]
-mov [r10+r11], ecx
-imul r8d, r8d, PARTS*ITEMS*STATE0_BYTES
-lea rdi, [rsi+r8]
-add rdi, rdx
-vmovq rax, xmm3
-movnti [rdi], rax
-vpextrq rax, xmm3, 1
-movnti [rdi+8], rax
-vmovq rax, xmm1
-movnti [rdi+16], rax
-_SkipA7:
 
 add ecx, 1
 test ecx, 0x0007ffff
