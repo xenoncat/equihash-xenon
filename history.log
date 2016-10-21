@@ -1,3 +1,10 @@
+20161021
+Fixed bug of assuming address under 32 bit. Triggered by vattay's OSX ASLR issue.
+
+Tip for Windows gcc (MinGW) compiler user, you can use the Linux's equihash_avx2.o with this function prototype:
+void __attribute__((sysv_abi)) EhPrepare(void *context, void *input);
+int32_t __attribute__((sysv_abi)) EhSolver(void *context, uint32_t nonce);
+
 20161017
 Added AVX1 version.
 

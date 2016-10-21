@@ -14,7 +14,8 @@ vmovdqa xmm6, xword [iv4xor128]
 vmovdqa xmm7, xword [iv4xor128+0x10]
 
 mov r8, rsp
-mov r9d, blake2sigma
+lea r9, [blake2sigma]
+lea r11, [blake2sigma+160]
 call _ProcBlakeMsgSched
 call _ProcBlakeRound
 add r8, 0x80
@@ -27,7 +28,7 @@ _LoopEhPrepare1:
 call _ProcBlakeMsgSched
 call _ProcBlakeRound
 add r9, 16
-cmp r9, blake2sigma+160
+cmp r9, r11
 jb _LoopEhPrepare1
 mov r8, rsp
 call _ProcBlakeRound
