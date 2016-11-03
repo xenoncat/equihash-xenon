@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <cpuid.h>
 #include <Python.h>
 
 
@@ -14,10 +15,34 @@
 #define EQXC_CONTEXT_ALLOC  (EQXC_CONTEXT_SIZE+4096)
 
 
-void EhPrepare_avx1(void *context, void *input);
-void EhPrepare_avx2(void *context, void *input);
+/* Declare assembler functions. */
+void    EhPrepare_avx1(void *context, void *input);
+void    EhPrepare_avx2(void *context, void *input);
 int32_t EhSolver_avx1(void *context, uint32_t nonce);
 int32_t EhSolver_avx2(void *context, uint32_t nonce);
+
+
+/* Return highest supported AVX version. (0 = no AVX, 1 = AVX1, 2 = AVX2) */
+static int check_avx_supported(void)
+{
+    unsigned int eax, ebx, ecx, edx;
+
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+        return 0;
+    }
+    if ((ecx & bit_AVX) == 0) {
+        return 0;
+    }
+
+    if (!__get_cpuid(7, &eax, &ebx, &ecx, &edx)) {
+        return 1;
+    }
+    if ((ebx & bit_AVX2) == 0) {
+        return 1;
+    }
+
+    return 2;
+}
 
 
 typedef struct {
@@ -25,6 +50,7 @@ typedef struct {
     void * context_alloc;
     void * context;
     int    avxversion;
+    int    hugetlb;
     int    prepared;
 } eqxc_data;
 
@@ -36,6 +62,7 @@ static int eqxc_init(PyObject *self, PyObject *args, PyObject *kwds)
     pdata->context_alloc = NULL;
     pdata->context = NULL;
     pdata->avxversion = 0;
+    pdata->hugetlb = 0;
     pdata->prepared = 0;
 
     static const char * keywords[] = { "avxversion", "hugetlb", NULL };
@@ -62,14 +89,24 @@ static int eqxc_init(PyObject *self, PyObject *args, PyObject *kwds)
         return -1;
     }
 
-    if (avxversion == -1) {
-// TODO : autodetect avxversion
-        pdata->avxversion = 1;
-    } else {
+    pdata->avxversion = check_avx_supported();
+    if (pdata->avxversion == 0) {
+        PyErr_SetString(PyExc_SystemError,
+                        "This module requires a CPU with AVX support");
+        return -1;
+    }
+
+    if (avxversion == 2 && pdata->avxversion < 2) {
+        PyErr_SetString(PyExc_SystemError, "CPU does not support AVX2");
+        return -1;
+    }
+    
+    if (avxversion != -1) {
         pdata->avxversion = avxversion;
     }
 
     if (hugetlb != 0) {
+        pdata->hugetlb = 1;
         pdata->context_alloc = mmap(NULL,
                                     EQXC_CONTEXT_ALLOC,
                                     PROT_READ | PROT_WRITE,
@@ -79,6 +116,7 @@ static int eqxc_init(PyObject *self, PyObject *args, PyObject *kwds)
 
     if (hugetlb == 0 ||
         (hugetlb == -1 && pdata->context_alloc == MAP_FAILED)) {
+        pdata->hugetlb = 0;
         pdata->context_alloc = mmap(NULL,
                                     EQXC_CONTEXT_ALLOC,
                                     PROT_READ | PROT_WRITE,
@@ -88,7 +126,7 @@ static int eqxc_init(PyObject *self, PyObject *args, PyObject *kwds)
 
     if (pdata->context_alloc == MAP_FAILED) {
         pdata->context_alloc = NULL;
-        PyErr_SetFromErrno(PyExc_MemoryError);
+        PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
 
@@ -203,6 +241,20 @@ static PyObject * eqxc_solve(PyObject *self, PyObject *args)
 }
 
 
+static PyObject * eqxc_get_avxversion(PyObject *self, void *context)
+{
+    eqxc_data *pdata = (eqxc_data *)self;
+    return PyLong_FromLong(pdata->avxversion);
+}
+
+
+static PyObject * eqxc_get_hugetlb(PyObject *self, void *context)
+{
+    eqxc_data *pdata = (eqxc_data *)self;
+    return (pdata->hugetlb) ? Py_True : Py_False;
+}
+
+
 static PyMethodDef eqxc_methods[] = {
     { "prepare", eqxc_prepare, METH_VARARGS,
       "prepare(input)\n\n"
@@ -216,6 +268,16 @@ static PyMethodDef eqxc_methods[] = {
       "Return a list of solutions, each solution represented as\n"
       "a 'bytes' object with 1344 bytes.\n" },
     { NULL, NULL, 0, NULL } };
+
+
+static PyGetSetDef eqxc_getset[] = {
+    { "avxversion", eqxc_get_avxversion, NULL,
+      "AVX version used by engine (1 or 2).",
+      NULL },
+    { "hugetlb", eqxc_get_hugetlb, NULL,
+      "True when using huge pages, otherwise False.",
+      NULL },
+    { NULL, NULL, NULL, NULL, NULL } };
 
 
 static PyTypeObject eqxc_type = {
@@ -248,12 +310,28 @@ static PyTypeObject eqxc_type = {
 };
 
 
+static PyObject * eqh_checkAvxSupported(PyObject *self, PyObject *args)
+{
+    int avxversion = check_avx_supported();
+    return PyLong_FromLong(avxversion);
+}
+
+
+static PyMethodDef eqh_methods[] = {
+    { "checkAvxSupported", eqh_checkAvxSupported, METH_NOARGS,
+      "checkAvxSupported()\n\n"
+      "Check AVX version supported by CPU.\n\n"
+      "Return 2 if the CPU supports AVX2, 1 if it supports only AVX1.\n"
+      "Return 0 if the CPU does not support AVX.\n" },
+    { NULL, NULL, 0, NULL } };
+
+
 static PyModuleDef eqh_module = {
     PyModuleDef_HEAD_INIT,      /* m_base */
     "equihash_xenoncat",        /* m_name */
     NULL,                       /* m_doc */
     -1,                         /* m_size */
-    NULL,                       /* m_methods */
+    eqh_methods,                /* m_methods */
     NULL,                       /* m_reload */
     NULL,                       /* m_traverse */
     NULL,                       /* m_clear */
@@ -268,6 +346,7 @@ PyInit_equihash_xenoncat(void)
     eqxc_type.tp_new      = PyType_GenericNew;
     eqxc_type.tp_init     = eqxc_init;
     eqxc_type.tp_methods  = eqxc_methods;
+    eqxc_type.tp_getset   = eqxc_getset;
 
     if (PyType_Ready(&eqxc_type) < 0)
         return NULL;
