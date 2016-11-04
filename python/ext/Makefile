@@ -2,10 +2,10 @@
 # Run assembler.
 #
 
-FASM = ../Linux/asm/fasm
+FASM = ../../Linux/asm/fasm
 FASMOPT = -m 512000
 
-ASMDIR = ../Linux/asm
+ASMDIR = ../../Linux/asm
 SOURCEFILES = $(wildcard $(ASMDIR)/*.asm) $(wildcard $(ASMDIR)/*.inc)
 
 all: equihash_lib_avx1.o equihash_lib_avx2.o
