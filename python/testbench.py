@@ -7,7 +7,22 @@ Simple test and benchmark of Python extension for Xenoncat's Equihash solver.
 import sys
 import argparse
 import os.path
+import struct
 import time
+
+import validate
+
+# Import the extension module.
+try:
+    import equihash_xenoncat
+
+except ImportError:
+    # Importing failed. Perhaps the extension was built but not yet installed.
+    import distutils.util
+    sys.path.append(os.path.join('build', 'lib.' +
+                                 distutils.util.get_platform() + '-' +
+                                 sys.version[:3]))
+    import equihash_xenoncat
 
 
 # Test input.
@@ -29,19 +44,6 @@ beta1_block2 = bytes([
     0x94, 0xa2, 0x53, 0x8e, 0x42, 0x5f, 0x21, 0x33,
     0xcf, 0xa8, 0xd3, 0xcb, 0xf4, 0xdf, 0x71, 0xef,
     0x38, 0x28, 0x51, 0x75, 0xcf, 0xed, 0xcb, 0x3e ])
-
-
-# Import the extension module.
-try:
-    import equihash_xenoncat
-
-except ImportError:
-    # Importing failed. Perhaps the extension was built but not yet installed.
-    import distutils.util
-    sys.path.append(os.path.join('build', 'lib.' +
-                                 distutils.util.get_platform() + '-' +
-                                 sys.version[:3]))
-    import equihash_xenoncat
 
 
 def timeit(func, *args):
@@ -70,6 +72,8 @@ def main():
         help='Allocate working memory in huge pages')
     parser.add_argument('--no-hugetlb', action='store_false', dest='hugetlb',
         help='Do not allocate working memory in huge pages')
+    parser.add_argument('--validate', action='store_true',
+        help='Check the correctness of each solution')
 
     args = parser.parse_args()
 
@@ -112,6 +116,7 @@ def main():
     niter = args.niter
     total_time = 0
     nsolution = 0
+    nfail = 0
 
     for i in range(niter):
 
@@ -123,11 +128,22 @@ def main():
         total_time += runtime
         nsolution += len(solutions)
 
+        if args.validate:
+            for sol in solutions:
+                header = inputheader[:136] + struct.pack('<I', nonce)
+                if not validate.validateSolution(200, 9, header, sol):
+                    print("FAILED: invalid solution detected")
+                    nfail += 1
+
     print("Total time: %.6f seconds, %.6f seconds per run average" %
           (total_time, total_time / float(niter)))
 
     print("Total solutions: %d, %.3f Sol/s average" %
           (nsolution, nsolution / total_time))
+
+    if args.validate:
+        print("Invalid solutions: %d" % nfail)
+        assert nfail == 0
 
 
 if __name__ == '__main__':
