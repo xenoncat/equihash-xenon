@@ -28,6 +28,7 @@ import struct
 BLAKE2B_BLOCKBYTES = 128
 BLAKE2B_OUTBYTES   = 64
 BLAKE2B_KEYBYTES   = 64
+BLAKE2B_PERSONALBYTES = 16
 
 BLAKE2B_IV = [
   0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
@@ -63,17 +64,30 @@ class Blake2bState:
     # size_t   outlen;
     # uint8_t  last_node;
 
-    def __init__(self, outlen, keylen):
+    def __init__(self, outlen, key, personal):
         """Initialize state structure."""
+
+        keylen = 0 if key is None else len(key)
 
         self.h = ( [ BLAKE2B_IV[0] ^ (0x01010000) ^ (keylen << 8) ^ outlen ] +
                    BLAKE2B_IV[1:] )
+
+        if personal is not None:
+            w = struct.unpack('<2Q', personal)
+            self.h[6] ^= w[0]
+            self.h[7] ^= w[1]
+
         self.t = [ 0, 0 ]
         self.f = [ 0, 0 ]
 
         self.buf = bytearray(BLAKE2B_BLOCKBYTES)
         self.buflen = 0
         self.outlen = outlen
+
+        if keylen > 0:
+            block = bytearray(BLAKE2B_BLOCKBYTES)
+            block[:keylen] = key
+            blake2b_update(self, block)
 
 
 G_INDEX_MAP = [ 
@@ -180,26 +194,22 @@ def blake2b_final(state):
     return bytes(buf[:state.outlen])
     
  
-def blake2b(outlen, indata, key):
+def blake2b(outlen, indata, key=None, personal=None):
     """Compute BLAKE2b hash digest.
 
-    outlen      -- output length in bytes
-    indata      -- input data (bytes object)
-    key         -- hash key (bytes object)
+    outlen      (int)   -- output length in bytes
+    indata      (bytes) -- input data
+    key         (bytes) -- optional hash key
+    personal    (bytes) -- optional 16-byte tweak
 
     Return the hash value as a bytes object.
     """
 
     assert outlen > 0 and outlen <= BLAKE2B_OUTBYTES
-    assert len(key) <= BLAKE2B_KEYBYTES
+    assert key is None or len(key) <= BLAKE2B_KEYBYTES
+    assert personal is None or len(personal) == BLAKE2B_PERSONALBYTES
 
-    state = Blake2bState(outlen, len(key))
-
-    if len(key) > 0:
-        block = bytearray(BLAKE2B_BLOCKBYTES)
-        block[:len(key)] = key
-        blake2b_update(state, block)
-
+    state = Blake2bState(outlen, key, personal)
     blake2b_update(state, indata)
     return blake2b_final(state)
 
