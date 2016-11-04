@@ -248,17 +248,46 @@ static PyObject * eqxc_solve(PyObject *self, PyObject *args)
 }
 
 
-static PyObject * eqxc_get_avxversion(PyObject *self, void *context)
+static PyObject * eqxc_get_avxversion(PyObject *self, void *pyctx)
 {
     eqxc_data *pdata = (eqxc_data *)self;
     return PyLong_FromLong(pdata->avxversion);
 }
 
 
-static PyObject * eqxc_get_hugetlb(PyObject *self, void *context)
+static PyObject * eqxc_get_hugetlb(PyObject *self, void *pyctx)
 {
     eqxc_data *pdata = (eqxc_data *)self;
     return (pdata->hugetlb) ? Py_True : Py_False;
+}
+
+
+static PyObject *eqxc_get_debugdata(PyObject *self, void *pyctx)
+{
+    eqxc_data *pdata = (eqxc_data *)self;
+    assert(pdata->context != NULL);
+
+    const uint64_t *debug = ((const uint64_t *)pdata->context) + 12800;
+    const unsigned int nitem = 21;
+
+    PyObject *tuple = PyTuple_New(nitem);
+    if (tuple == NULL) {
+        return NULL;
+    }
+
+    for (unsigned int i = 0; i < nitem; i++) {
+        PyObject *v = PyLong_FromUnsignedLong(debug[1+i]);
+        if (v == NULL) {
+            Py_DECREF(tuple);
+            return NULL;
+        }
+        if (PyTuple_SetItem(tuple, i, v) != 0) {
+            Py_DECREF(tuple);
+            return NULL;
+        }
+    }
+
+    return tuple;
 }
 
 
@@ -283,6 +312,10 @@ static PyGetSetDef eqxc_getset[] = {
       NULL },
     { "hugetlb", eqxc_get_hugetlb, NULL,
       "True when using huge pages, otherwise False.",
+      NULL },
+    { "debugdata", eqxc_get_debugdata, NULL,
+      "List of debug data items from assembler code.\n"
+      "See struct_eh.asm for the meaning of these numbers.",
       NULL },
     { NULL, NULL, NULL, NULL, NULL } };
 
