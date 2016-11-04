@@ -27,17 +27,24 @@ static int check_avx_supported(void)
 {
     unsigned int eax, ebx, ecx, edx;
 
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
-        return 0;
-    }
-    if ((ecx & bit_AVX) == 0) {
+    __cpuid(1, eax, ebx, ecx, edx);
+
+    if (((ecx >> 28) & 1) == 0) {
+        /* AVX not supported */
         return 0;
     }
 
-    if (!__get_cpuid(7, &eax, &ebx, &ecx, &edx)) {
+    __cpuid(0, eax, ebx, ecx, edx);
+
+    if (eax < 7) {
+        /* CPUID page 7 not supported (implies no AVX2) */
         return 1;
     }
-    if ((ebx & bit_AVX2) == 0) {
+
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+
+    if (((ebx >> 5) & 1) == 0) {
+        /* AVX2 not supported */
         return 1;
     }
 

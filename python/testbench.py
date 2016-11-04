@@ -70,7 +70,7 @@ def main():
         help='Select AVX instruction set (1 for AVX1, 2 for AVX2)')
     parser.add_argument('--hugetlb', action='store_true',
         help='Allocate working memory in huge pages')
-    parser.add_argument('--no-hugetlb', action='store_false', dest='hugetlb',
+    parser.add_argument('--no-hugetlb', action='store_true',
         help='Do not allocate working memory in huge pages')
     parser.add_argument('--validate', action='store_true',
         help='Check the correctness of each solution')
@@ -95,7 +95,7 @@ def main():
 
     print("Initialize Equihash engine ...")
     avxversion = -1 if args.avx is None else args.avx
-    hugetlb    = -1 if args.hugetlb is None else (1 if args.hugetlb else 0)
+    hugetlb    = 1 if args.hugetlb else (0 if args.no_hugetlb else -1)
 
     eqh = equihash_xenoncat.EquihashXenoncat(avxversion=avxversion,
                                              hugetlb=hugetlb)
