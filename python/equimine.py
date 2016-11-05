@@ -23,6 +23,8 @@ Options:
 import sys
 import argparse
 import asyncio
+import collections
+import hashlib
 import logging
 import json
 import os
@@ -43,44 +45,36 @@ except ImportError:
     import equihash_xenoncat
 
 
-import base64
-import binascii
-import hashlib
-import select
+############################################################
+# Utility functions
+############################################################
+
+def HexToBytes(h):
+    """Convert hex string to bytes object."""
+
+    if len(h) % 2 != 0:
+        raise ValueError('Invalid hex string length %d (expecting even length)'
+                         % len(h))
+    return bytes([ int(h[i:i+2], 16) for i in range(0, len(h), 2) ])
 
 
-class StratumError(Exception):
-    """Raised when a communication error occurs with the Stratum server."""
+def BytesToHex(b):
+    """Convert bytes to hex string."""
 
-    pass
-
-
-class WorkerHandle:
-    """Used by the main process to represent a worker process."""
-
-    def fileno():
-        """Return file descriptor index for select/poll."""
-
-    def doRead():
-        """Called when the file descriptor is ready for reading."""
+    return ''.join([ ('%02x' % t) for t in b ])
 
 
-class MiningManager:
-    """Manages the flow of information between Stratum pool and workers."""
+def HexToLeU32(h):
+    """Convert hex string to 4-byte little-endian unsigned integer."""
 
-    def __init__(self, eventloop):
-        self.eventloop = eventloop
-
-    def setPool(self, pool):
-        self.pool = pool
-
-    def poolConnectionUp(self):
-        pass # whatever
-
-    def poolConnectionDown(self):
-        pass # TODO
+    if len(h) != 8:
+        raise ValueError('Got hex string length %d (expecting length 8)'
+                         % len(h))
+    b = bytes([ int(h[i:i+2], 16) for i in range(0, 8, 2) ])
+    return struct.unpack('<I', b)[0]
 
 
+# TODO : not needed ?
 class SHA256_raw:
 
     _h0, _h1, _h2, _h3, _h4, _h5, _h6, _h7 = (
@@ -157,6 +151,27 @@ class SHA256_raw:
           self._h4, self._h5, self._h6, self._h7)
 
 
+############################################################
+# Worker threads
+############################################################
+
+class WorkerHandle:
+    """Used by the main process to represent a worker process."""
+
+    def fileno(self):
+        """Return file descriptor index for select/poll."""
+
+    def doReadf(self):
+        """Called when the file descriptor is ready for reading."""
+
+
+############################################################
+# Stratum client
+############################################################
+
+JobStruct = collections.namedtuple('JobStruct', 'jobid header bntime nonce1')
+
+
 class StratumClient:
     """Client for Stratum mining pool."""
 
@@ -173,7 +188,10 @@ class StratumClient:
         self.password   = password
         self.conn       = None
         self.job        = None
+        self.sessionid  = None
+        self.nonce1     = None
         self.target     = None
+        self.submitcnt  = 0
         self.reqid      = 0
         self.inbuf      = b''
         self.pendingCompletion = { }
@@ -208,6 +226,8 @@ class StratumClient:
         """Close connection to pool."""
 
         self.job    = None
+        self.sessionid = None
+        self.nonce1 = None
         self.target = None
         self.inbuf  = b''
         self.pendingCompletion = { }
@@ -216,6 +236,28 @@ class StratumClient:
             self.eventloop.remove_reader(self.conn)
             self.conn.close()
             self.conn = None
+
+    def submit(self, job, nonce2, solution):
+        """Submit solution to Stratum pool."""
+
+        if self.conn is None:
+            self.log.error('Can not submit while not connected')
+            return
+
+        self.submitcnt += 1
+        self.log.info('Submitting solution #%d', self.submitcnt)
+
+        # Send RPC request.
+        params = [ self.username,
+                   job.jobid,
+                   BytesToHex(job.jobntime),
+                   BytesToHex(nonce2),
+                   BytesToHex(solution) ]
+
+        completion = lambda r, e: self._submitted(self.submitcnt, r, e)
+        self.sendRequest(method="mining.submit",
+                         params=params,
+                         completion=completion)
 
     def sendRequest(self, method, params, completion):
         """Send JSON request to pool and register completion handler."""
@@ -239,11 +281,27 @@ class StratumClient:
             self.close()
             self.manager.poolConnectionDown()
 
-    def _subscribed(self, result):
+    def _subscribed(self, result, err):
         """Called when the pool answers our subscribe request."""
 
-        self.log.debug("result=%r", result)
-# TODO : do something with result
+        self.log.debug("mining.subscribe result=%r", result)
+
+        try:
+            if len(result) < 2:
+                raise ValueError('Invalid subscription result (need 2 values)')
+            self.nonce1 = HexToBytes(result[0])
+            if len(self.nonce1) > 28:
+                raise ValueError('Got nonce1 length %d (maximum is 28)' %
+                                 len(self.nonce1))
+            self.sessionid = result[1]
+        except (TypeError, ValueError) as e:
+            self.log.error(type(e) + ': ' + str(e))
+            self.log.error('mining.subscribe result=%r, error=%r', result, err)
+            self.close()
+            self.manager.poolConnectionDown()
+            return
+
+        self.log.info('Subscribed to pool session=%s', self.sessionid)
 
         self.log.info('Authenticating to pool')
 
@@ -251,7 +309,7 @@ class StratumClient:
                          params=[ self.username, self.password ],
                          completion=self._authorized)
 
-    def _authorized(self, result):
+    def _authorized(self, result, err):
         """Called when the pool answers our authorize request."""
 
         if result:
@@ -259,7 +317,17 @@ class StratumClient:
             self.manager.poolConnectionUp()
         else:
             self.log.error("Authentication to pool failed")
+            self.log.error('mining.authorize result=%r error=%r', result, err)
+            self.close()
             self.manager.poolConnectionDown()
+
+    def _submitted(self, submitcnt, result, err):
+        """Called when the pool answers a submit request."""
+
+        if result:
+            self.log.info("Solution #%d accepted", submitcnt)
+        else:
+            self.log.info("Solution #%d rejected (%r)", submitcnt, err)
 
     def _readyRead(self):
         """Called by the event loop when we receive data from the pool."""
@@ -278,7 +346,7 @@ class StratumClient:
 
             if not s:
                 # Socket closed by server.
-                self.log.warn('Connection closed by pool')
+                self.log.warning('Connection closed by pool')
                 self.close()
                 break
 
@@ -308,19 +376,23 @@ class StratumClient:
     def _handleMessage(self, msg):
         """Handle a JSON message from the pool."""
 
-# TODO : more careful type checking
-        err = msg.get('error')
+        try:
+            err    = msg.get('error')
+            reqid  = msg.get('id')
+            result = msg.get('result')
+        except (TypeError, AttributeError) as e:
+            self.log.error('Invalid RPC message %r', msg)
+            return
+            
         if err:
             self.log.error("RPC error %r", err)
 
-        reqid  = msg.get('id')
-        result = msg.get('result')
         if reqid is not None and result is not None:
             # This is an answer to a request from us.
             if reqid in self.pendingCompletion:
                 completion = self.pendingCompletion[reqid]
                 del self.pendingCompletion[reqid]
-                completion(result)
+                completion(result, err)
             else:
                 self.log.error('Got answer to unknown request id %r', reqid)
 
@@ -339,19 +411,49 @@ class StratumClient:
             return
 
         if method == 'mining.notify':
-            (jobid, prevhash, coinb1, coinb2, merkle, vers, nbits, ntime, cleanjobs) = params
-            dtime = int(ntime, 16) - time.time()
-            self.log.info("new job, jobid='%s', dtime=%.1f" % (jobid, dtime))
-            self.pending_work = { 'jobid': jobid,
-                                  'prevhash': prevhash,
-                                  'coinb1': coinb1,
-                                  'coinb2': coinb2,
-                                  'merkle': merkle,
-                                  'version': vers,
-                                  'nbits': nbits,
-                                  'cleanjobs': cleanjobs,
-                                  'dtime': dtime,
-                                  'difficulty': self.difficulty }
+            try:
+                if len(params) < 8:
+                    raise ValueError('Invalid job parameters (need 8 values)')
+                jobid       = params[0]
+                version     = HexToLeU32(params[1])
+                if version != 4:
+                    raise ValueError('Invalid job version (need version 4)')
+                bversion    = HexToBytes(params[1])
+                bprevhash   = HexToBytes(params[2])
+                bmerkleroot = HexToBytes(params[3])
+                breserved   = HexToBytes(params[4])
+                bntime      = HexToBytes(params[5])
+                ntime       = HexToLeU32(params[5])
+                bbits       = HexToBytes(params[6])
+                cleanjobs   = bool(params[7])
+                if len(bversion) != 4:
+                    raise ValueError('Got job version len %d (expecting 4)',
+                                     len(bversion))
+                if len(bprevhash) != 32:
+                    raise ValueError('Got job prevhash len %d (expecting 32)',
+                                     len(bprevhash))
+                if len(bmerkleroot) != 32:
+                    raise ValueError('Got job merkleroot len %d (expecting 32)',
+                                     len(bmerkleroot))
+                if len(breserved) != 32:
+                    raise ValueError('Got job reserved len %d (expecting 32)',
+                                     len(breserved))
+                if len(bntime) != 4:
+                    raise ValueError('Got job ntime len %d (expecting 4)',
+                                     len(bntime))
+                if len(bbits) != 4:
+                    raise ValueError('Got job bits len %d (expecting 4)',
+                                     len(bbits))
+            except (TypeError, ValueError) as e:
+                self.log.error(type(e) + ': ' + str(e))
+                self.log.error('mining.notify params=%r', params)
+                return
+            dtime = ntime - time.time()
+            self.log.info("New job id=%s, dtime=%.1f", jobid, dtime)
+            header = ( bversion + bprevhash + bmerkleroot + breserved +
+                       bntime + bbits )
+            self.job = JobStruct(jobid, header, bntime, self.nonce1)
+            self.manager.jobChanged(self.job)
 
         elif method == 'mining.set_target':
             try:
@@ -365,11 +467,42 @@ class StratumClient:
                                params)
                 return
             self.log.info('Target changed to %064x', self.target)
-# TODO maybe self.manager.targetChanged()
+            self.manager.targetChanged(self.target)
 
         else:
-            self.log.error("Unknown RPC method '%s' from server" % method)
+            self.log.error("Unknown RPC method %r from server", method)
 
+
+############################################################
+# Mining manager
+############################################################
+
+class MiningManager:
+    """Manages the flow of information between Stratum pool and workers."""
+
+    def __init__(self, eventloop):
+        self.eventloop = eventloop
+        self.pool = None
+
+    def setPool(self, pool):
+        self.pool = pool
+
+    def poolConnectionUp(self):
+        pass # whatever
+
+    def poolConnectionDown(self):
+        pass # TODO
+
+    def targetChanged(self, newtarget):
+        pass # TODO
+
+    def jobChanged(self, newjob):
+        pass # TODO
+
+
+############################################################
+# Main program
+############################################################
 
 # Test input.
 beta1_block2 = bytes([
