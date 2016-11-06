@@ -100,6 +100,8 @@ class Worker:
 
         self.log.debug('Initializing Equihash engine')
         self.xenon = equihash_xenoncat.EquihashXenoncat(hugetlb=hugetlb)
+        self.log.debug('using avxversion=%d hugetlb=%d',
+                       self.xenon.avxversion, self.xenon.hugetlb)
 
     def run(self):
 
@@ -150,23 +152,34 @@ class Worker:
             elif msg[0] == 'job':
                 self.startJob(JobStruct(*msg[1]), msg[2], msg[3])
 
+    def _sendMsg(self, msg):
+        """Send message to main process."""
+
+        try:
+            self.conn.send(msg)
+        except OSError:
+            # Ignore send errors. If connection to main process is lost,
+            # we will discover it when trying to read.
+            self.log.error('Can not send message to main process')
+
     def submit(self, nonce2, solution):
         """Submit solution to main process."""
 
         msg = ('submit', tuple(self.job), nonce2, solution)
-        self.conn.send(msg)
+        self._sendMsg(msg)
 
     def stats(self):
         """Send statistics to main process."""
 
         msg = ('stats', self.itercnt, self.solcnt)
-        self.conn.send(msg)
+        self._sendMsg(msg)
 
     def startJob(self, job, startnonce, target):
 
-        self.log.debug('Worker %d starts job %r', self.taskid, self.job.jobid)
+        self.log.debug('Worker %d starts job %r', self.taskid, job.jobid)
 
-        self.job    = job
+        self.job = job
+        self.nonceval = startnonce
         self.target = target
 
     def checkSolution(self, nonce2, solution):
@@ -175,7 +188,7 @@ class Worker:
         header = self.job.header + self.job.nonce1 + nonce2 + solution
         h1 = hashlib.sha256(header).digest()
         h2 = hashlib.sha256(h1).digest()
-        return h2 <= target
+        return h2 <= self.target
 
     def solverun(self):
         """Run one iteration of the solver."""
@@ -191,6 +204,7 @@ class Worker:
 
         # Prepare Equihash engine for input data.
         inputdata = self.job.header + self.job.nonce1 + noncebase
+        assert len(inputdata) == 136
         self.xenon.prepare(inputdata)
 
         # Run Equihash solver.
@@ -237,8 +251,13 @@ class WorkerHandle:
         self.log.info('Creating worker %d' % taskid)
 
         # Create worker process and start.
+        # Set the 'daemon' flag to True to make sure that the child will
+        # be terminated when the main process ends, instead of the main
+        # process deadlocking by waiting for the child to end.
         args = (taskid, conn2, hugetlb, list(all_parent_connections))
-        self.proc = multiprocessing.Process(target=self._run, args=args)
+        self.proc = multiprocessing.Process(target=self._run,
+                                            args=args,
+                                            daemon=True)
         self.proc.start()
 
         # Close child end of pipe to work around multiprocessing issues.
@@ -247,6 +266,16 @@ class WorkerHandle:
         # Listen to messages from worker.
         eventloop.add_reader(self.conn, self._readyRead)
 
+    def _sendMsg(self, msg):
+        """Send message to worker process."""
+
+        try:
+            self.conn.send(msg)
+        except OSError:
+            # Ignore send errors. If connection to worker is lost,
+            # we will discover it when trying to read.
+            self.log.error('Can not send message to worker %d', self.taskid)
+
     def close(self):
         """Stop worker and clean up worker process."""
 
@@ -254,10 +283,7 @@ class WorkerHandle:
 
         # Send command to close worker.
         msg = ('close',)
-        try:
-            self.conn.send(msg)
-        except OSError:
-            pass # ignore errors in case connection already broken
+        self._sendMsg(msg)
         self.conn.close()
         all_parent_connections.remove(self.conn)
         self.conn = None
@@ -272,12 +298,12 @@ class WorkerHandle:
         """Pause worker."""
 
         msg = ('pause',)
-        self.conn.send(msg)
+        self._sendMsg(msg)
 
     def startJob(self, job, startnonce, target):
 
         msg = ('job', tuple(job), startnonce, target)
-        self.conn.send(msg)
+        self._sendMsg(msg)
 
     def _readyRead(self):
         """Called when the worker process sends a message."""
@@ -317,15 +343,18 @@ class WorkerHandle:
         for c in must_close_connections:
             c.close()
 
-        worker = Worker(taskid, conn, hugetlb)
-        worker.run()
+        try:
+            worker = Worker(taskid, conn, hugetlb)
+            worker.run()
+        except KeyboardInterrupt:
+            print("Worker %d exit on Ctrl-C" % taskid, file=sys.stderr)
 
 
 ############################################################
 # Stratum client
 ############################################################
 
-JobStruct = collections.namedtuple('JobStruct', 'jobid header bntime nonce1')
+JobStruct = collections.namedtuple('JobStruct', 'jobid header ntime nonce1')
 
 
 class StratumClient:
@@ -370,8 +399,6 @@ class StratumClient:
         self.conn = socket.create_connection((self.host, self.port),
                                              timeout=self.TIMEOUT)
 
-        self.conn.settimeout(self.TIMEOUT)
-
         self.eventloop.add_reader(self.conn, self._readyRead)
 
         self.log.info('Subscribing to pool')
@@ -408,7 +435,7 @@ class StratumClient:
         # Send RPC request.
         params = [ self.username,
                    job.jobid,
-                   BytesToHex(job.jobntime),
+                   BytesToHex(job.ntime),
                    BytesToHex(nonce2),
                    BytesToHex(solution) ]
 
@@ -433,6 +460,7 @@ class StratumClient:
         # Send request to server.
         self.log.debug("sending: '%s'", reqstr)
         try:
+            self.conn.settimeout(self.TIMEOUT)
             self.conn.send(reqstr.encode() + b'\n')
         except OSError as e:
             self.log.error(type(e) + ': ' + str(e))
@@ -500,8 +528,14 @@ class StratumClient:
 
             # Non-blocking read from socket.
             try:
-                s = self.conn.recv(4096, socket.MSG_DONTWAIT)
-            except BlockingIOError:
+                # NOTE: It may seem like we could use MSG_DONTWAIT here
+                # to avoid constantly changing the timeout/blocking mode
+                # of the socket. WRONG!!
+                # The fucking Python library silently ignores MSG_DONTWAIT
+                # when a timeout has been set for the socket.
+                self.conn.setblocking(False)
+                s = self.conn.recv(4096)
+            except (BlockingIOError, socket.timeout):
                 # No more data available.
                 break
 
@@ -513,26 +547,29 @@ class StratumClient:
 
             self.inbuf += s
 
-            # Decode messages from server.
-            while self.conn is not None:
+            if self.inbuf.find(b'\n') >= 0:
+                break
 
-                p = self.inbuf.find(b'\n')
-                if p < 0:
-                    break
+        # Decode messages from server.
+        while True:
 
-                msgstr = self.inbuf[:p].decode(errors='replace')
-                self.inbuf = self.inbuf[p+1:]
-                self.log.debug("receved: '%s'", msgstr)
+            p = self.inbuf.find(b'\n')
+            if p < 0:
+                break
 
-                msg = None
-                try:
-                    msg = json.loads(msgstr)
-                except ValueError as e:
-                    # Report invalid message, then ignore it.
-                    self.log.error(type(e) + ': ' + str(e))
+            msgstr = self.inbuf[:p].decode(errors='replace')
+            self.inbuf = self.inbuf[p+1:]
+            self.log.debug("receved: '%s'", msgstr)
 
-                if msg is not None:
-                    self._handleMessage(msg)
+            msg = None
+            try:
+                msg = json.loads(msgstr)
+            except ValueError as e:
+                # Report invalid message, then ignore it.
+                self.log.error(type(e) + ': ' + str(e))
+
+            if msg is not None:
+                self._handleMessage(msg)
 
     def _handleMessage(self, msg):
         """Handle a JSON message from the pool."""
@@ -541,6 +578,7 @@ class StratumClient:
             err    = msg.get('error')
             reqid  = msg.get('id')
             result = msg.get('result')
+            have_result = ('result' in msg)
         except (TypeError, AttributeError) as e:
             self.log.error('Invalid RPC message %r', msg)
             return
@@ -548,7 +586,7 @@ class StratumClient:
         if err:
             self.log.error("RPC error %r", err)
 
-        if reqid is not None and result is not None:
+        if reqid is not None and have_result:
             # This is an answer to a request from us.
             if reqid in self.pendingCompletion:
                 completion = self.pendingCompletion[reqid]
@@ -588,22 +626,22 @@ class StratumClient:
                 bbits       = HexToBytes(params[6])
                 cleanjobs   = bool(params[7])
                 if len(bversion) != 4:
-                    raise ValueError('Got job version len %d (expecting 4)',
+                    raise ValueError('Got job version len %d (expecting 4)' %
                                      len(bversion))
                 if len(bprevhash) != 32:
-                    raise ValueError('Got job prevhash len %d (expecting 32)',
+                    raise ValueError('Got job prevhash len %d (expecting 32)' %
                                      len(bprevhash))
                 if len(bmerkleroot) != 32:
-                    raise ValueError('Got job merkleroot len %d (expecting 32)',
-                                     len(bmerkleroot))
+                    raise ValueError('Got job merkleroot len %d (expecting 32)'
+                                     % len(bmerkleroot))
                 if len(breserved) != 32:
-                    raise ValueError('Got job reserved len %d (expecting 32)',
+                    raise ValueError('Got job reserved len %d (expecting 32)' %
                                      len(breserved))
                 if len(bntime) != 4:
-                    raise ValueError('Got job ntime len %d (expecting 4)',
+                    raise ValueError('Got job ntime len %d (expecting 4)' %
                                      len(bntime))
                 if len(bbits) != 4:
-                    raise ValueError('Got job bits len %d (expecting 4)',
+                    raise ValueError('Got job bits len %d (expecting 4)' %
                                      len(bbits))
             except (TypeError, ValueError) as e:
                 self.log.error(type(e) + ': ' + str(e))
@@ -618,17 +656,19 @@ class StratumClient:
 
         elif method == 'mining.set_target':
             try:
-                (target,) = params
-                targetval = int(target, 16)
-                if targetval <= 0 or targetval >= 2**256:
-                    raise ValueError('Bad target value')
+                if len(params) < 1:
+                    raise ValueError('Invalid target parameters')
+                target = HexToBytes(params[0])
+                if len(target) != 32:
+                    raise ValueError('Got target len %d (expecting 32)' %
+                                     len(target))
             except (TypeError, ValueError) as e:
                 self.log.error('Bad parameters for mining.set_target %r',
                                params)
                 return
-            self.log.info('Target changed to %064x', targetval)
-            if targetval != self.target:
-                self.target = targetval
+            self.log.info('Target changed to ' + BytesToHex(target))
+            if target != self.target:
+                self.target = target
                 self.manager.targetChanged(self.target)
 
         else:
@@ -639,14 +679,14 @@ class StratumClient:
 # Mining manager
 ############################################################
 
+StatItem = collections.namedtuple('StatItem',
+                                  'time niter nsol nshare score')
+
 class MiningManager:
     """Manages the flow of information between Stratum pool and workers."""
 
     RECONNECT_INTERVAL  = 10.0
     SHOW_STATS_INTERVAL = 10.0
-
-    StatItem = collections.namedtuple('StatItem',
-                                      'time niter nsol nshare score')
 
     def __init__(self, eventloop):
 
@@ -739,10 +779,11 @@ class MiningManager:
         self.stathistory.append(h1)
         self.stathistory = self.stathistory[-30:]
 
-        dtime  = h1.time  - h0.time
-        diter  = h1.niter - h0.niter
-        dsol   = h1.nsol  - h0.nsol
-        dscore = h1.score - h0.score
+        dtime  = h1.time   - h0.time
+        diter  = h1.niter  - h0.niter
+        dsol   = h1.nsol   - h0.nsol
+        dshare = h1.nshare - h0.nshare
+        dscore = h1.score  - h0.score
 
         iter_rate  = diter / dtime
         sol_rate   = dsol  / dtime
@@ -827,7 +868,7 @@ class BenchmarkManager:
             iter_rate = totaliter / duration
             sol_rate  = totalsol / duration
 
-            self.log.info('%d runs, %d solutions in %.6f seconds',
+            self.log.info('%d runs, %d solutions in %.3f seconds',
                           totaliter, totalsol, duration)
             self.log.info('%.3f run/s, %.3f Sol/s',
                           iter_rate, sol_rate)
@@ -835,7 +876,7 @@ class BenchmarkManager:
 
         elif self.iterdone % 5 == 0:
 
-            self.log.info('%d runs in %.6f seconds',
+            self.log.info('%d runs in %.3f seconds',
                           self.iterdone, duration)
 
     def submit(self, job, nonce, solution):
@@ -936,13 +977,11 @@ def main():
 
     # Create workers.
     hugetlb = 1 if args.hugetlb else (0 if args.no_hugetlb else -1)
-    workers = [ ]
     for i in range(args.t):
         wh = WorkerHandle(eventloop=eventloop,
                           manager=manager,
                           taskid=i+1,
                           hugetlb=hugetlb)
-        workers.append(wh)
         manager.addWorker(wh)
 
     if args.b is not None:
@@ -962,14 +1001,13 @@ def main():
         manager.setPool(pool)
 
         # Prepare to connect to pool.
-        eventloop.call_soon(stratum.connect)
+        eventloop.call_soon(pool.connect)
 
     # Main loop.
-    eventloop.run_forever()
-
-    # Stop workers.
-    for wh in workers:
-        wh.close()
+    try:
+        eventloop.run_forever()
+    except KeyboardInterrupt:
+        print("Exit on Ctrl-C", file=sys.stderr)
 
     sys.exit(manager.exitcode)
 
