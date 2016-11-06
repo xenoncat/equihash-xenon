@@ -25,8 +25,9 @@ import argparse
 import asyncio
 import collections
 import hashlib
-import logging
 import json
+import logging
+import multiprocessing
 import os
 import os.path
 import socket
@@ -43,6 +44,16 @@ except ImportError:
                                  distutils.util.get_platform() + '-' +
                                  sys.version[:3]))
     import equihash_xenoncat
+
+
+############################################################
+# Exceptions
+############################################################
+
+class MinerError(Exception):
+    """Raised in case of fatal error."""
+
+    pass
 
 
 ############################################################
@@ -155,14 +166,182 @@ class SHA256_raw:
 # Worker threads
 ############################################################
 
+class Worker:
+    """Running inside worker process."""
+
+    def __init__(self, taskid, conn, hugetlb):
+
+        self.log     = logging.getLogger('w%d' % taskid)
+        self.taskid  = taskid
+        self.conn    = conn
+        self.itercnt = 0
+        self.solcnt  = 0
+        self.job     = None
+        self.startnonce = None
+        self.target  = None
+        self.closing = False
+
+        # TODO : init equihash engine
+
+    def run(self):
+
+        self.log.debug('Starting worker %d', self.taskid)
+
+        while not self.closing:
+
+            self.handleMessages()
+            if self.closing:
+                break
+
+            if self.job is not None:
+                self.solver()
+
+        self.log.debug('Stopping worker %d', self.taskid)
+
+        self.conn.close()
+        self.conn = None
+
+    def handleMessages(self):
+
+        while not self.closing:
+
+            if self.job is None:
+                # Nothing to do, wait for message.
+                timeout = 2.0
+            else:
+                # Job in progress, only read received messages.
+                timeout = 0.0
+
+            try:
+                if not self.conn.poll(timeout):
+                    break
+                msg = self.conn.recv()
+            except EOFError as e:
+                self.log.error('Lost connection to main process')
+                self.closing = True
+                break
+
+            if msg[0] == 'close':
+                self.closing = True
+
+            elif msg[0] == 'pause':
+                self.job = None
+                self.log.debug('Pausing worker %d', self.taskid)
+
+            elif msg[0] == 'job':
+                self.job = JobStruct(*msg[1])
+                self.startnonce = msg[2]
+                self.target = msg[3]
+                self.log.debug('Worker %d starts job %r',
+                               self.taskid, self.job.jobid)
+
+    def solver(self):
+
+        # TODO : run solver
+        time.sleep(1)
+
+        self.itercnt += 1
+
+        # TODO : process solutions
+        # TODO : submit solutions within target
+
+        # Send statistics to main process.
+        msg = ('stats', self.itercnt, self.solcnt)
+        self.conn.send(msg)
+
+
 class WorkerHandle:
     """Used by the main process to represent a worker process."""
 
-    def fileno(self):
-        """Return file descriptor index for select/poll."""
+    def __init__(self, eventloop, manager, taskid, hugetlb):
+        """Create worker process."""
 
-    def doReadf(self):
-        """Called when the file descriptor is ready for reading."""
+        self.log       = logging.getLogger('wh%d' % taskid)
+
+        self.eventloop = eventloop
+        self.manager   = manager
+        self.taskid    = taskid
+
+        self.itercnt   = 0
+        self.solcnt    = 0
+
+        # Create communication pipe.
+        (conn1, conn2) = multiprocessing.Pipe(duplex=True)
+        self.conn = conn1
+
+        self.log.info('Creating worker %d' % taskid)
+
+        # Create worker process and start.
+        self.proc = multiprocessing.Process(target=self._run,
+                                            args=(taskid, conn2, hugetlb))
+        self.proc.start()
+
+        # Listen to messages from worker.
+        eventloop.add_reader(self.conn, self._readyRead)
+
+    def close(self):
+        """Stop worker and clean up worker process."""
+
+        self.log.info('Stopping worker %d' % self.taskid)
+
+        # Send command to close worker.
+        msg = ('close',)
+        self.conn.send(msg)
+        self.conn.close()
+        self.conn = None
+
+        # Clean up worker process.
+        self.proc.join()
+        self.proc = None
+
+        self.log.info('Worker %d cleaned up' % self.taskid)
+
+    def pause(self):
+        """Pause worker."""
+
+        msg = ('pause',)
+        self.conn.send(msg)
+
+    def startJob(self, job, startnonce, target):
+
+        msg = ('job', tuple(job), startnonce, target)
+        self.conn.send(msg)
+
+    def _readyRead(self):
+        """Called when the worker process sends a message."""
+
+        try:
+            msg = self.conn.recv()
+        except EOFError as e:
+            # This happens if the worker fails to initialize or if
+            # it crashes. There is no sensible way to continue at this
+            # point, so stop the miner.
+            self.log.error('Lost connection to worker %d', self.taskid)
+            self.manager.terminate()
+
+        if msg[0] == 'submit':
+            job      = JobStruct(*msg[1])
+            nonce    = msg[2]
+            solution = msg[3]
+            self.manager.submit(job, nonce, solution)
+
+        elif msg[0] == 'stats':
+            self.itercnt = msg[1]
+            self.solcnt  = msg[2]
+            if self.manager.benchmarking:
+                self.manager.statsUpdated()
+
+        else:
+            self.log.error("Invalid message from workes %d (%r)",
+                           self.taskid, msg)
+            self.manager.terminate()
+
+    @staticmethod
+    def _run(taskid, conn, hugetlb):
+        """Main function inside worker process."""
+
+        worker = Worker(taskid, conn, hugetlb)
+        worker.run()
 
 
 ############################################################
@@ -192,6 +371,8 @@ class StratumClient:
         self.nonce1     = None
         self.target     = None
         self.submitcnt  = 0
+        self.sharecnt   = 0
+        self.sharescore = 0.0
         self.reqid      = 0
         self.inbuf      = b''
         self.pendingCompletion = { }
@@ -241,7 +422,7 @@ class StratumClient:
         """Submit solution to Stratum pool."""
 
         if self.conn is None:
-            self.log.error('Can not submit while not connected')
+            self.log.warning('Can not submit while not connected')
             return
 
         self.submitcnt += 1
@@ -326,6 +507,9 @@ class StratumClient:
 
         if result:
             self.log.info("Solution #%d accepted", submitcnt)
+            self.sharecnt += 1
+            self.sharescore += 1.0 / sum([ self.target[i] / 256.0**(i+1)
+                                           for i in range(8) ])
         else:
             self.log.info("Solution #%d rejected (%r)", submitcnt, err)
 
@@ -461,13 +645,14 @@ class StratumClient:
                 targetval = int(target, 16)
                 if targetval <= 0 or targetval >= 2**256:
                     raise ValueError('Bad target value')
-                self.target = targetval
             except (TypeError, ValueError) as e:
                 self.log.error('Bad parameters for mining.set_target %r',
                                params)
                 return
-            self.log.info('Target changed to %064x', self.target)
-            self.manager.targetChanged(self.target)
+            self.log.info('Target changed to %064x', targetval)
+            if targetval != self.target:
+                self.target = targetval
+                self.manager.targetChanged(self.target)
 
         else:
             self.log.error("Unknown RPC method %r from server", method)
@@ -480,28 +665,119 @@ class StratumClient:
 class MiningManager:
     """Manages the flow of information between Stratum pool and workers."""
 
+    RECONNECT_INTERVAL  = 10.0
+    SHOW_STATS_INTERVAL = 10.0
+
+    StatItem = collections.namedtuple('StatItem',
+                                      'time niter nsol nshare score')
+
     def __init__(self, eventloop):
+
+        self.log = logging.getLogger('manager')
         self.eventloop = eventloop
         self.pool = None
+        self.workers = [ ]
+        self.firstconnection = True
+        self.exitcode = 0
+        self.benchmarking = False
+        self.stathistory = [ ]
 
     def setPool(self, pool):
+        """Attach manager to a Stratum pool."""
+
         self.pool = pool
 
+    def addWorker(self, wh):
+        """Add a new WorkerHandle."""
+
+        self.workers.append(wh)
+
     def poolConnectionUp(self):
-        pass # whatever
+        """Called when the connection to the Stratum pool is online."""
+
+        if self.firstconnection:
+            self.firstconnection = False
+            self.stathistory = [ StatItem(time.monotonic(),
+                                          0, 0,
+                                          self.pool.sharecnt,
+                                          self.pool.sharescore) ]
+            self.eventloop.call_later(self.SHOW_STATS_INTERVAL, self._showStats)
 
     def poolConnectionDown(self):
-        pass # TODO
+        """Called when the connection to the Stratum pool is lost."""
+
+        if self.firstconnection:
+            # First connection failed; just give up now.
+            self.terminate()
+
+        # Pause all workers.
+        for wh in self.workers:
+            wh.pause()
+
+        # Wait 10 seconds; then try to reconnect to the pool.
+        self.eventloop.call_later(self.RECONNECT_INTERVAL, self.pool.connect)
 
     def targetChanged(self, newtarget):
-        pass # TODO
+        """Called when the Stratum pool sends a new target."""
+
+        # Send new target to workers.
+        if self.pool.job is not None:
+            for (i, wh) in enumerate(self.workers):
+                startnonce = i * (2**32 // len(self.workers))
+                wh.startJob(self.pool.job, startnonce, newtarget)
 
     def jobChanged(self, newjob):
-        pass # TODO
+        """Called when the Stratum pool sends a new job."""
+
+        # Send new job to workers.
+        if self.pool.target is not None:
+            for (i, wh) in enumerate(self.workers):
+                startnonce = i * (2**32 // len(self.workers))
+                wh.startJob(newjob, startnonce, self.pool.target)
+
+    def submit(self, job, nonce, solution):
+        """Called when a worker finds a solution within target."""
+
+        self.pool.submit(job, nonce, solution)
+
+    def terminate(self):
+        """Terminate miner after fatal error."""
+
+        self.log.warning('Terminating miner')
+        self.exitcode = 1
+        self.eventloop.stop()
+
+    def _showStats(self):
+        """Show statistics."""
+
+        totaliter = sum([ wh.itercnt for wh in self.workers ])
+        totalsol  = sum([ wh.solcnt  for wh in self.workers ])
+
+        h0 = self.stathistory[0]
+        h1 = StatItem(time.monotonic(),
+                      totaliter, totalsol,
+                      self.pool.sharecnt,
+                      self.pool.sharescore)
+        self.stathistory.append(h1)
+        self.stathistory = self.stathistory[-30:]
+
+        dtime  = h1.time  - h0.time
+        diter  = h1.niter - h0.niter
+        dsol   = h1.nsol  - h0.nsol
+        dscore = h1.score - h0.score
+
+        iter_rate  = diter / dtime
+        sol_rate   = dsol  / dtime
+        share_rate = 3600 * dshare / dtime
+        luck = 0 if diter == 0 else dscore / (2.0 * diter)
+        self.log.info('%.3f run/s, %.3f Sol/s, %.3f share/hr (%d%% luck)',
+                      iter_rate, sol_rate, share_rate, round(100 * luck))
+
+        self.eventloop.call_later(self.SHOW_STATS_INTERVAL, self._showStats)
 
 
 ############################################################
-# Main program
+# Benchmark
 ############################################################
 
 # Test input.
@@ -525,6 +801,80 @@ beta1_block2 = bytes([
     0x38, 0x28, 0x51, 0x75, 0xcf, 0xed, 0xcb, 0x3e ])
 
 
+class BenchmarkManager:
+    """Benchmark driver, acting as a dummy mining manager."""
+
+    def __init__(self, eventloop, niter):
+
+        self.log = logging.getLogger('bench')
+        self.eventloop = eventloop
+        self.niter     = niter
+        self.iterdone  = 0
+        self.workers = [ ]
+        self.exitcode = 0
+        self.benchmarking = True
+
+    def addWorker(self, wh):
+        """Add a new WorkerHandle."""
+
+        self.workers.append(wh)
+
+    def start(self):
+        """Start benchmark on all workers."""
+
+        self.starttime = time.monotonic()
+
+        header = beta1_block2[0:108]
+        bntime = beta1_block2[100:104]
+        nonce1 = beta1_block2[108:136]
+        job = JobStruct('test', header, bntime, nonce1)
+
+        target = bytes(32 * [ 0 ])
+
+        for (i, wh) in enumerate(self.workers):
+            startnonce = i * (2**32 // len(self.workers))
+            wh.startJob(job, startnonce, target)
+
+    def statsUpdated(self):
+        """Called when worker completes an iteration."""
+
+        duration = time.monotonic() - self.starttime
+        self.iterdone += 1
+
+        if self.iterdone == self.niter:
+
+            totaliter = sum([ wh.itercnt for wh in self.workers ])
+            totalsol  = sum([ wh.solcnt  for wh in self.workers ])
+
+            iter_rate = totaliter / duration
+            sol_rate  = totalsol / duration
+
+            self.log.info('%d runs, %d solutions in %.6f seconds',
+                          totaliter, totalsol, duration)
+            self.log.info('%.3f run/s, %.3f Sol/s',
+                          iter_rate, sol_rate)
+            self.eventloop.stop()
+
+        elif self.iterdone % 5 == 0:
+
+            self.log.info('%d runs in %.6f seconds',
+                          self.iterdone, duration)
+
+    def submit(self, job, nonce, solution):
+        pass
+
+    def terminate(self):
+        """Terminate miner after fatal error."""
+
+        self.log.warning('Terminating miner')
+        self.exitcode = 1
+        self.eventloop.stop()
+
+
+############################################################
+# Main program
+############################################################
+
 def main():
     """Main program."""
 
@@ -533,9 +883,9 @@ def main():
     parser.format_usage = lambda: __doc__
     parser.format_help  = lambda: __doc__
 
-    parser.add_argument('-l', action='store', type=str, required=True,
+    parser.add_argument('-l', action='store', type=str,
         help='Host and TCP port of Stratum server')
-    parser.add_argument('-u', action='store', type=str, required=True,
+    parser.add_argument('-u', action='store', type=str,
         help='Username for Stratum server (usually z-cash address)')
     parser.add_argument('-p', action='store', type=str, default='x',
         help="Password for Stratum server (default: 'x')")
@@ -552,19 +902,32 @@ def main():
 
     args = parser.parse_args()
 
-    w = args.l.split(':')
-    if len(w) != 2:
-        print("ERROR: Invalid -l argument, expecting 'host:port'",
-              file=sys.stderr)
-        sys.exit(1)
+    if args.b is None:
+        # Not running in benchmark mode; need host and username.
 
-    host = w[0]
-    try:
-        port = int(w[1])
-    except ValueError:
-        print("ERROR: Invalid -l argument, expecting 'host:port'",
-              file=sys.stderr)
-        sys.exit(1)
+        if args.l is None:
+            print("ERROR: Missing required argument -l", 
+                  file=sys.stderr)
+            sys.exit(1)
+
+        if args.u is None:
+            print("ERROR: Missing required argument -u",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        w = args.l.split(':')
+        if len(w) != 2:
+            print("ERROR: Invalid -l argument, expecting 'host:port'",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        host = w[0]
+        try:
+            port = int(w[1])
+        except ValueError:
+            print("ERROR: Invalid -l argument, expecting 'host:port'",
+                  file=sys.stderr)
+            sys.exit(1)
 
     if args.t < 1 or args.t > 100:
         print("ERROR: Invalid -t argument, expecting value from 1 to 100",
@@ -578,7 +941,7 @@ def main():
 
     # Initialize logging.
     logging.basicConfig(
-        format='%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s',
+        format='%(asctime)s.%(msecs)03d %(name)-7s %(levelname)-5s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         level=logging.DEBUG if args.d else logging.INFO)
 
@@ -586,22 +949,51 @@ def main():
     eventloop = asyncio.SelectorEventLoop()
 
     # Create mining manager.
-    manager = MiningManager(eventloop)
+    if args.b is not None:
+        # Running in benchmark mode.
+        manager = BenchmarkManager(eventloop, args.b)
+    else:
+        # Running in mining mode.
+        manager = MiningManager(eventloop)
 
-    # Create stratum client.
-    stratum = StratumClient(eventloop=eventloop,
-                            manager=manager,
-                            host=host,
-                            port=port,
-                            username=args.u,
-                            password=args.p)
-    manager.setPool(stratum)
+    # Create workers.
+    hugetlb = 1 if args.hugetlb else (0 if args.no_hugetlb else -1)
+    workers = [ ]
+    for i in range(args.t):
+        wh = WorkerHandle(eventloop=eventloop,
+                          manager=manager,
+                          taskid=i+1,
+                          hugetlb=hugetlb)
+        workers.append(wh)
+        manager.addWorker(wh)
 
-    # Prepare to connect to pool.
-    eventloop.call_soon(stratum.connect)
+    if args.b is not None:
+        # Prepare to start benchmark.
+        eventloop.call_soon(manager.start)
+
+    else:
+        # Running in mining mode.
+
+        # Create stratum client.
+        pool = StratumClient(eventloop=eventloop,
+                             manager=manager,
+                             host=host,
+                             port=port,
+                             username=args.u,
+                             password=args.p)
+        manager.setPool(pool)
+
+        # Prepare to connect to pool.
+        eventloop.call_soon(stratum.connect)
 
     # Main loop.
     eventloop.run_forever()
+
+    # Stop workers.
+    for wh in workers:
+        wh.close()
+
+    sys.exit(manager.exitcode)
 
 
 if __name__ == '__main__':
