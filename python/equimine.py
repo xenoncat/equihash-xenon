@@ -47,16 +47,6 @@ except ImportError:
 
 
 ############################################################
-# Exceptions
-############################################################
-
-class MinerError(Exception):
-    """Raised in case of fatal error."""
-
-    pass
-
-
-############################################################
 # Utility functions
 ############################################################
 
@@ -85,86 +75,13 @@ def HexToLeU32(h):
     return struct.unpack('<I', b)[0]
 
 
-# TODO : not needed ?
-class SHA256_raw:
-
-    _h0, _h1, _h2, _h3, _h4, _h5, _h6, _h7 = (
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19)
-
-    def handle(self, chunk):
-
-        w = list(struct.unpack('>' + 16 * 'I', chunk))
-
-        rrot = lambda x, n: (x >> n) | (x << (32 - n))
-
-        k = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-            0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-            0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-            0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-            0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-            0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-            0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
-
-        for i in range(16, 64):
-            s0 = rrot(w[i - 15], 7) ^ rrot(w[i - 15], 18) ^ (w[i - 15] >> 3)
-            s1 = rrot(w[i - 2], 17) ^ rrot(w[i - 2], 19) ^ (w[i - 2] >> 10)
-            w.append((w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff)
-
-        a = self._h0
-        b = self._h1
-        c = self._h2
-        d = self._h3
-        e = self._h4
-        f = self._h5
-        g = self._h6
-        h = self._h7
-
-        for i in range(64):
-            s0 = rrot(a, 2) ^ rrot(a, 13) ^ rrot(a, 22)
-            maj = (a & b) ^ (a & c) ^ (b & c)
-            t2 = s0 + maj
-            s1 = rrot(e, 6) ^ rrot(e, 11) ^ rrot(e, 25)
-            ch = (e & f) ^ ((~ e) & g)
-            t1 = h + s1 + ch + k[i] + w[i]
-
-            h = g
-            g = f
-            f = e
-            e = (d + t1) & 0xffffffff
-            d = c
-            c = b
-            b = a
-            a = (t1 + t2) & 0xffffffff
-
-        self._h0 = (self._h0 + a) & 0xffffffff
-        self._h1 = (self._h1 + b) & 0xffffffff
-        self._h2 = (self._h2 + c) & 0xffffffff
-        self._h3 = (self._h3 + d) & 0xffffffff
-        self._h4 = (self._h4 + e) & 0xffffffff
-        self._h5 = (self._h5 + f) & 0xffffffff
-        self._h6 = (self._h6 + g) & 0xffffffff
-        self._h7 = (self._h7 + h) & 0xffffffff
-
-    def digest(self):
-        return struct.pack('>IIIIIIII',
-          self._h0, self._h1, self._h2, self._h3,
-          self._h4, self._h5, self._h6, self._h7)
-
-
 ############################################################
 # Worker threads
 ############################################################
+
+# Workaround for multiprocessing issues.
+all_parent_connections = [ ]
+
 
 class Worker:
     """Running inside worker process."""
@@ -177,11 +94,12 @@ class Worker:
         self.itercnt = 0
         self.solcnt  = 0
         self.job     = None
-        self.startnonce = None
         self.target  = None
+        self.nonceval  = None
         self.closing = False
 
-        # TODO : init equihash engine
+        self.log.debug('Initializing Equihash engine')
+        self.xenon = equihash_xenoncat.EquihashXenoncat(hugetlb=hugetlb)
 
     def run(self):
 
@@ -194,7 +112,8 @@ class Worker:
                 break
 
             if self.job is not None:
-                self.solver()
+                self.solverun()
+                self.stats()
 
         self.log.debug('Stopping worker %d', self.taskid)
 
@@ -216,7 +135,7 @@ class Worker:
                 if not self.conn.poll(timeout):
                     break
                 msg = self.conn.recv()
-            except EOFError as e:
+            except (EOFError, OSError) as e:
                 self.log.error('Lost connection to main process')
                 self.closing = True
                 break
@@ -229,25 +148,63 @@ class Worker:
                 self.log.debug('Pausing worker %d', self.taskid)
 
             elif msg[0] == 'job':
-                self.job = JobStruct(*msg[1])
-                self.startnonce = msg[2]
-                self.target = msg[3]
-                self.log.debug('Worker %d starts job %r',
-                               self.taskid, self.job.jobid)
+                self.startJob(JobStruct(*msg[1]), msg[2], msg[3])
 
-    def solver(self):
+    def submit(self, nonce2, solution):
+        """Submit solution to main process."""
 
-        # TODO : run solver
-        time.sleep(1)
+        msg = ('submit', tuple(self.job), nonce2, solution)
+        self.conn.send(msg)
 
-        self.itercnt += 1
+    def stats(self):
+        """Send statistics to main process."""
 
-        # TODO : process solutions
-        # TODO : submit solutions within target
-
-        # Send statistics to main process.
         msg = ('stats', self.itercnt, self.solcnt)
         self.conn.send(msg)
+
+    def startJob(self, job, startnonce, target):
+
+        self.log.debug('Worker %d starts job %r', self.taskid, self.job.jobid)
+
+        self.job    = job
+        self.target = target
+
+    def checkSolution(self, nonce2, solution):
+        """Check that specified solution is within difficulty target."""
+
+        header = self.job.header + self.job.nonce1 + nonce2 + solution
+        h1 = hashlib.sha256(header).digest()
+        h2 = hashlib.sha256(h1).digest()
+        return h2 <= target
+
+    def solverun(self):
+        """Run one iteration of the solver."""
+
+        # Create dummy nonce bytes to fill up to required nonce length.
+        assert len(self.job.nonce1) + 4 <= 32
+        noncebase = (32 - len(self.job.nonce1) - 4) * b'\x00'
+
+        # Calculate full nonce2 data.
+        nonce2 = noncebase + struct.pack('<I', self.nonceval)
+
+        self.log.debug('Run equihash solver')
+
+        # Prepare Equihash engine for input data.
+        inputdata = self.job.header + self.job.nonce1 + noncebase
+        self.xenon.prepare(inputdata)
+
+        # Run Equihash solver.
+        solutions = self.xenon.solve(self.nonceval)
+        self.log.debug('found %d solutions', len(solutions))
+
+        self.nonceval += 1
+        self.itercnt  += 1
+        self.solcnt   += len(solutions)
+
+        # Submit solutions within target.
+        for sol in solutions:
+            if self.checkSolution(nonce2, sol):
+                self.submit(nonce2, sol)
 
 
 class WorkerHandle:
@@ -269,12 +226,23 @@ class WorkerHandle:
         (conn1, conn2) = multiprocessing.Pipe(duplex=True)
         self.conn = conn1
 
+        # NOTE: The multiprocessing module is fucked up to the point
+        # that it is barely usable. Since all childs inherit all pipe
+        # descriptors, all pipes remain open until all processes exit
+        # therefore one crashing process causes deadlock on all other
+        # processes. We hack our way through it by manually closing
+        # descriptors.
+        all_parent_connections.append(conn1)
+
         self.log.info('Creating worker %d' % taskid)
 
         # Create worker process and start.
-        self.proc = multiprocessing.Process(target=self._run,
-                                            args=(taskid, conn2, hugetlb))
+        args = (taskid, conn2, hugetlb, list(all_parent_connections))
+        self.proc = multiprocessing.Process(target=self._run, args=args)
         self.proc.start()
+
+        # Close child end of pipe to work around multiprocessing issues.
+        conn2.close()
 
         # Listen to messages from worker.
         eventloop.add_reader(self.conn, self._readyRead)
@@ -286,8 +254,12 @@ class WorkerHandle:
 
         # Send command to close worker.
         msg = ('close',)
-        self.conn.send(msg)
+        try:
+            self.conn.send(msg)
+        except OSError:
+            pass # ignore errors in case connection already broken
         self.conn.close()
+        all_parent_connections.remove(self.conn)
         self.conn = None
 
         # Clean up worker process.
@@ -312,18 +284,19 @@ class WorkerHandle:
 
         try:
             msg = self.conn.recv()
-        except EOFError as e:
+        except (EOFError, OSError) as e:
             # This happens if the worker fails to initialize or if
             # it crashes. There is no sensible way to continue at this
             # point, so stop the miner.
             self.log.error('Lost connection to worker %d', self.taskid)
             self.manager.terminate()
+            return
 
         if msg[0] == 'submit':
             job      = JobStruct(*msg[1])
-            nonce    = msg[2]
+            nonce2   = msg[2]
             solution = msg[3]
-            self.manager.submit(job, nonce, solution)
+            self.manager.submit(job, nonce2, solution)
 
         elif msg[0] == 'stats':
             self.itercnt = msg[1]
@@ -337,8 +310,12 @@ class WorkerHandle:
             self.manager.terminate()
 
     @staticmethod
-    def _run(taskid, conn, hugetlb):
+    def _run(taskid, conn, hugetlb, must_close_connections):
         """Main function inside worker process."""
+
+        # Close parent side of pipes to work around multiprocessing issues.
+        for c in must_close_connections:
+            c.close()
 
         worker = Worker(taskid, conn, hugetlb)
         worker.run()
@@ -709,6 +686,7 @@ class MiningManager:
         if self.firstconnection:
             # First connection failed; just give up now.
             self.terminate()
+            return
 
         # Pause all workers.
         for wh in self.workers:
@@ -735,10 +713,10 @@ class MiningManager:
                 startnonce = i * (2**32 // len(self.workers))
                 wh.startJob(newjob, startnonce, self.pool.target)
 
-    def submit(self, job, nonce, solution):
+    def submit(self, job, nonce2, solution):
         """Called when a worker finds a solution within target."""
 
-        self.pool.submit(job, nonce, solution)
+        self.pool.submit(job, nonce2, solution)
 
     def terminate(self):
         """Terminate miner after fatal error."""
