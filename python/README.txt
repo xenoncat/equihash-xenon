@@ -31,6 +31,15 @@ Command-line options are available to choose the number of iterations,
 select the AVX instruction set, enable or disable huge pages.
 
 
+  Mining
+  ------
+
+equimine.py is a simple Zcash miner for Stratum pools.
+Within the 'python' folder, run the miner by typing:
+
+  python3 equimine.py -l host.name.com:tcpport -u zcash_address
+
+
   Support modules
   ---------------
 

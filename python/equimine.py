@@ -966,17 +966,18 @@ def main():
         # Not running in benchmark mode; need host and username.
 
         if args.l is None:
-            print("ERROR: Missing required argument -l", 
-                  file=sys.stderr)
+            print(__doc__, file=sys.stderr)
+            print("ERROR: Missing required argument -l", file=sys.stderr)
             sys.exit(1)
 
         if args.u is None:
-            print("ERROR: Missing required argument -u",
-                  file=sys.stderr)
+            print(__doc__, file=sys.stderr)
+            print("ERROR: Missing required argument -u", file=sys.stderr)
             sys.exit(1)
 
         w = args.l.split(':')
         if len(w) != 2:
+            print(__doc__, file=sys.stderr)
             print("ERROR: Invalid -l argument, expecting 'host:port'",
                   file=sys.stderr)
             sys.exit(1)
@@ -985,16 +986,19 @@ def main():
         try:
             port = int(w[1])
         except ValueError:
+            print(__doc__, file=sys.stderr)
             print("ERROR: Invalid -l argument, expecting 'host:port'",
                   file=sys.stderr)
             sys.exit(1)
 
     if args.t < 1 or args.t > 100:
+        print(__doc__, file=sys.stderr)
         print("ERROR: Invalid -t argument, expecting value from 1 to 100",
               file=sys.stderr)
         sys.exit(1)
 
     if args.b is not None and args.b < 1:
+        print(__doc__, file=sys.stderr)
         print("ERROR: Invalid -b argument, expecting positive value",
               file=sys.stderr)
         sys.exit(1)
