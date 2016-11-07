@@ -27,6 +27,7 @@ import collections
 import hashlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import os.path
@@ -85,6 +86,8 @@ all_parent_connections = [ ]
 
 class Worker:
     """Running inside worker process."""
+
+    SOLPREFIX = struct.pack('<BH', 253, 1344)
 
     def __init__(self, taskid, conn, hugetlb):
 
@@ -188,7 +191,11 @@ class Worker:
         header = self.job.header + self.job.nonce1 + nonce2 + solution
         h1 = hashlib.sha256(header).digest()
         h2 = hashlib.sha256(h1).digest()
-        return h2 <= self.target
+
+        # NOTE: Must read SHA256 hash digest in reserve byte order.
+        h = h2[::-1]
+
+        return h <= self.target
 
     def solverun(self):
         """Run one iteration of the solver."""
@@ -217,8 +224,15 @@ class Worker:
 
         # Submit solutions within target.
         for sol in solutions:
-            if self.checkSolution(nonce2, sol):
-                self.submit(nonce2, sol)
+
+            # NOTE: The binary Equihash solution must be prefixed with
+            # a 3-byte length marker before further processing.
+            # I didn't know this and spent several hours figuring out why
+            # all my solutions were invalid.
+            bsol = self.SOLPREFIX + sol
+
+            if self.checkSolution(nonce2, bsol):
+                self.submit(nonce2, bsol)
 
 
 class WorkerHandle:
@@ -679,14 +693,38 @@ class StratumClient:
 # Mining manager
 ############################################################
 
-StatItem = collections.namedtuple('StatItem',
-                                  'time niter nsol nshare score')
+class AverageStat:
+    """Keep track of filtered average statistic over time."""
+
+    def __init__(self, timeconst):
+
+        self.timeconst = timeconst
+        self.ptime = None
+        self.pval  = None
+        self.rate  = None
+
+    def update(self, ntime, nval):
+
+        if self.ptime is not None and ntime > self.ptime:
+            dtime = ntime - self.ptime
+            dval  = nval  - self.pval
+            nrate = dval / float(dtime)
+            if self.rate is None:
+                self.rate = nrate
+            else:
+                k = math.exp(- dtime * (1.0 / self.timeconst))
+                self.rate = k * self.rate + (1.0 - k) * nrate
+
+        self.pval  = nval
+        self.ptime = ntime
+
 
 class MiningManager:
     """Manages the flow of information between Stratum pool and workers."""
 
     RECONNECT_INTERVAL  = 10.0
     SHOW_STATS_INTERVAL = 10.0
+    STATS_TIMECONST     = 600.0  # 10 minutes
 
     def __init__(self, eventloop):
 
@@ -697,7 +735,11 @@ class MiningManager:
         self.firstconnection = True
         self.exitcode = 0
         self.benchmarking = False
-        self.stathistory = [ ]
+
+        self.avg_iter_rate  = AverageStat(self.STATS_TIMECONST)
+        self.avg_solve_rate = AverageStat(self.STATS_TIMECONST)
+        self.avg_share_rate = AverageStat(self.STATS_TIMECONST)
+        self.avg_score_rate = AverageStat(self.STATS_TIMECONST)
 
     def setPool(self, pool):
         """Attach manager to a Stratum pool."""
@@ -714,11 +756,13 @@ class MiningManager:
 
         if self.firstconnection:
             self.firstconnection = False
-            self.stathistory = [ StatItem(time.monotonic(),
-                                          0, 0,
-                                          self.pool.sharecnt,
-                                          self.pool.sharescore) ]
-            self.eventloop.call_later(self.SHOW_STATS_INTERVAL, self._showStats)
+            t = time.monotonic()
+            self.avg_iter_rate.update(t, 0)
+            self.avg_solve_rate.update(t, 0)
+            self.avg_share_rate.update(t, 0)
+            self.avg_score_rate.update(t, 0)
+            self.eventloop.call_later(self.SHOW_STATS_INTERVAL,
+                                      self._showStats)
 
     def poolConnectionDown(self):
         """Called when the connection to the Stratum pool is lost."""
@@ -768,29 +812,26 @@ class MiningManager:
     def _showStats(self):
         """Show statistics."""
 
-        totaliter = sum([ wh.itercnt for wh in self.workers ])
-        totalsol  = sum([ wh.solcnt  for wh in self.workers ])
+        t = time.monotonic()
 
-        h0 = self.stathistory[0]
-        h1 = StatItem(time.monotonic(),
-                      totaliter, totalsol,
-                      self.pool.sharecnt,
-                      self.pool.sharescore)
-        self.stathistory.append(h1)
-        self.stathistory = self.stathistory[-30:]
+        totaliter  = sum([ wh.itercnt for wh in self.workers ])
+        totalsolve = sum([ wh.solcnt  for wh in self.workers ])
 
-        dtime  = h1.time   - h0.time
-        diter  = h1.niter  - h0.niter
-        dsol   = h1.nsol   - h0.nsol
-        dshare = h1.nshare - h0.nshare
-        dscore = h1.score  - h0.score
+        self.avg_iter_rate.update(t,  totaliter)
+        self.avg_solve_rate.update(t, totalsolve)
+        self.avg_share_rate.update(t, self.pool.sharecnt)
+        self.avg_score_rate.update(t, self.pool.sharescore)
 
-        iter_rate  = diter / dtime
-        sol_rate   = dsol  / dtime
-        share_rate = 3600 * dshare / dtime
-        luck = 0 if diter == 0 else dscore / (2.0 * diter)
+        iter_rate  = self.avg_iter_rate.rate
+        solve_rate = self.avg_solve_rate.rate
+        share_rate = self.avg_share_rate.rate
+        score_rate = self.avg_score_rate.rate
+        luck = 0 if iter_rate < 1.0e-8 else score_rate / (2.0 * iter_rate)
+
         self.log.info('%.3f run/s, %.3f Sol/s, %.3f share/hr (%d%% luck)',
-                      iter_rate, sol_rate, share_rate, round(100 * luck))
+                      iter_rate, solve_rate,
+                      3600 * share_rate,
+                      round(100 * luck))
 
         self.eventloop.call_later(self.SHOW_STATS_INTERVAL, self._showStats)
 
