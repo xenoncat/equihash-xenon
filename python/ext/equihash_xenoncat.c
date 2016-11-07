@@ -194,7 +194,7 @@ static PyObject * eqxc_prepare(PyObject *self, PyObject *args)
 
     pdata->prepared = 1;
 
-    return Py_None;
+    Py_RETURN_NONE;
 }
 
 
@@ -258,7 +258,7 @@ static PyObject * eqxc_get_avxversion(PyObject *self, void *pyctx)
 static PyObject * eqxc_get_hugetlb(PyObject *self, void *pyctx)
 {
     eqxc_data *pdata = (eqxc_data *)self;
-    return (pdata->hugetlb) ? Py_True : Py_False;
+    return PyBool_FromLong(pdata->hugetlb);
 }
 
 
