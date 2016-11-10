@@ -477,7 +477,7 @@ class StratumClient:
             self.conn.settimeout(self.TIMEOUT)
             self.conn.send(reqstr.encode() + b'\n')
         except OSError as e:
-            self.log.error(type(e) + ': ' + str(e))
+            self.log.error(str(type(e)) + ': ' + str(e))
             self.close()
             self.manager.poolConnectionDown()
 
@@ -495,7 +495,7 @@ class StratumClient:
                                  len(self.nonce1))
             self.sessionid = result[1]
         except (TypeError, ValueError) as e:
-            self.log.error(type(e) + ': ' + str(e))
+            self.log.error(str(type(e)) + ': ' + str(e))
             self.log.error('mining.subscribe result=%r, error=%r', result, err)
             self.close()
             self.manager.poolConnectionDown()
@@ -581,7 +581,7 @@ class StratumClient:
                 msg = json.loads(msgstr)
             except ValueError as e:
                 # Report invalid message, then ignore it.
-                self.log.error(type(e) + ': ' + str(e))
+                self.log.error(str(type(e)) + ': ' + str(e))
 
             if msg is not None:
                 self._handleMessage(msg)
@@ -659,7 +659,7 @@ class StratumClient:
                     raise ValueError('Got job bits len %d (expecting 4)' %
                                      len(bbits))
             except (TypeError, ValueError) as e:
-                self.log.error(type(e) + ': ' + str(e))
+                self.log.error(str(type(e)) + ': ' + str(e))
                 self.log.error('mining.notify params=%r', params)
                 return
             dtime = ntime - time.time()
