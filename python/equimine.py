@@ -557,7 +557,8 @@ class StratumClient:
                 # Socket closed by server.
                 self.log.warning('Connection closed by pool')
                 self.close()
-                break
+                self.manager.poolConnectionDown()
+                return
 
             self.inbuf += s
 
