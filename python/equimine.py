@@ -387,7 +387,6 @@ class StratumClient:
         self.password   = password
         self.conn       = None
         self.job        = None
-        self.sessionid  = None
         self.nonce1     = None
         self.target     = None
         self.submitcnt  = 0
@@ -425,11 +424,15 @@ class StratumClient:
         """Close connection to pool."""
 
         self.job    = None
-        self.sessionid = None
         self.nonce1 = None
         self.target = None
         self.inbuf  = b''
         self.pendingCompletion = { }
+
+        # Note: Some Stratum pool implementations are so fucked up that
+        # they require the client to start with id=1 for the first request
+        # on each connection.
+        self.reqid      = 0
 
         if self.conn is not None:
             self.eventloop.remove_reader(self.conn)
@@ -486,14 +489,19 @@ class StratumClient:
 
         self.log.debug("mining.subscribe result=%r", result)
 
+        # The meaning of mining.subscribed result is unclear.
+        # Many Stratum specs say that result[1] is extranonce1.
+        # However Slush says for Zcash mining result[0] is extranonce1
+        # and result[1] is the session ID.
+        # We bet on result[1], it seems to work with most pools.
+
         try:
             if len(result) < 2:
                 raise ValueError('Invalid subscription result (need 2 values)')
-            self.nonce1 = HexToBytes(result[0])
+            self.nonce1 = HexToBytes(result[1])
             if len(self.nonce1) > 28:
                 raise ValueError('Got nonce1 length %d (maximum is 28)' %
                                  len(self.nonce1))
-            self.sessionid = result[1]
         except (TypeError, ValueError) as e:
             self.log.error(str(type(e)) + ': ' + str(e))
             self.log.error('mining.subscribe result=%r, error=%r', result, err)
@@ -501,7 +509,7 @@ class StratumClient:
             self.manager.poolConnectionDown()
             return
 
-        self.log.info('Subscribed to pool session=%s', self.sessionid)
+        self.log.info('Subscribed to pool nonce1=%s', BytesToHex(self.nonce1))
 
         self.log.info('Authenticating to pool')
 
