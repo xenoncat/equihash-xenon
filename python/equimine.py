@@ -98,6 +98,7 @@ class Worker:
         self.solcnt  = 0
         self.job     = None
         self.target  = None
+        self.noncebase = None
         self.nonceval  = None
         self.closing = False
 
@@ -185,6 +186,12 @@ class Worker:
         self.nonceval = startnonce
         self.target = target
 
+        # Create random nonce bytes to fill up to required nonce length.
+        assert len(job.nonce1) + 4 <= 32
+        self.noncebase = b''
+        if len(job.nonce1) + 4 < 32:
+            self.noncebase = os.urandom(32 - 4 - len(job.nonce1))
+
     def checkSolution(self, nonce2, solution):
         """Check that specified solution is within difficulty target."""
 
@@ -200,17 +207,13 @@ class Worker:
     def solverun(self):
         """Run one iteration of the solver."""
 
-        # Create dummy nonce bytes to fill up to required nonce length.
-        assert len(self.job.nonce1) + 4 <= 32
-        noncebase = (32 - len(self.job.nonce1) - 4) * b'\x00'
-
         # Calculate full nonce2 data.
-        nonce2 = noncebase + struct.pack('<I', self.nonceval)
+        nonce2 = self.noncebase + struct.pack('<I', self.nonceval)
 
         self.log.debug('Run equihash solver')
 
         # Prepare Equihash engine for input data.
-        inputdata = self.job.header + self.job.nonce1 + noncebase
+        inputdata = self.job.header + self.job.nonce1 + self.noncebase
         assert len(inputdata) == 136
         self.xenon.prepare(inputdata)
 
